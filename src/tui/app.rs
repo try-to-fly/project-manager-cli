@@ -43,6 +43,9 @@ pub enum AppState {
     /// 确认对话框
     ConfirmDialog,
     
+    /// 外部编辑器状态
+    ExternalEditor,
+    
     /// 错误状态
     Error(String),
     
@@ -157,7 +160,11 @@ impl App {
                         break;
                     }
                     
-                    self.handle_key_event(key).await?;
+                    let needs_redraw = self.handle_key_event(key).await?;
+                    if needs_redraw {
+                        // 清除屏幕并强制重绘
+                        terminal.clear()?;
+                    }
                 }
                 Event::Mouse(mouse) => {
                     self.handle_mouse_event(mouse).await?;
@@ -267,11 +274,13 @@ impl App {
         Ok(())
     }
     
-    /// 处理键盘事件
-    async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+    /// 处理键盘事件（返回true表示需要强制重绘）
+    async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> Result<bool> {
+        let mut needs_redraw = false;
+        
         match self.state {
             AppState::ProjectList => {
-                self.handle_project_list_keys(key).await?;
+                needs_redraw = self.handle_project_list_keys(key).await?;
             }
             AppState::ProjectDetail => {
                 self.handle_project_detail_keys(key).await?;
@@ -284,14 +293,18 @@ impl App {
             AppState::ConfirmDialog => {
                 self.handle_confirm_dialog_keys(key).await?;
             }
+            AppState::ExternalEditor => {
+                // 在外部编辑器状态下，不处理任何键盘事件
+                // 事件处理将在spawn_nvim方法中完成后自动恢复
+            }
             _ => {}
         }
         
-        Ok(())
+        Ok(needs_redraw)
     }
     
-    /// 处理项目列表键盘事件
-    async fn handle_project_list_keys(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+    /// 处理项目列表键盘事件（返回true表示需要强制重绘）
+    async fn handle_project_list_keys(&mut self, key: crossterm::event::KeyEvent) -> Result<bool> {
         if keys::is_up_key(&key) && self.selected_project > 0 {
             self.selected_project -= 1;
         } else if keys::is_down_key(&key) && self.selected_project < self.projects.len().saturating_sub(1) {
@@ -317,9 +330,16 @@ impl App {
             if !self.projects.is_empty() {
                 self.toggle_ignore_project().await?;
             }
+        } else if keys::is_nvim_key(&key) {
+            if !self.projects.is_empty() {
+                if let Some(project) = self.projects.get(self.selected_project) {
+                    let project_path = project.path.clone();
+                    return self.spawn_nvim(&project_path).await;
+                }
+            }
         }
         
-        Ok(())
+        Ok(false)
     }
     
     /// 处理项目列表鼠标事件
@@ -426,6 +446,11 @@ impl App {
                 self.main_screen.draw_project_list(f, size, &self.projects, self.selected_project, &self.current_tab);
                 self.draw_confirm_dialog(f, size);
             }
+            AppState::ExternalEditor => {
+                // 在外部编辑器状态下，显示空屏幕或者保持最后的界面
+                // 由于实际上此时终端被nvim接管，这个状态可能不会被渲染
+                self.draw_loading_screen(f, size);
+            }
             AppState::Error(ref error) => {
                 self.draw_error_screen(f, size, error);
             }
@@ -492,6 +517,7 @@ impl App {
             Line::from("  d, Delete       - 删除项目"),
             Line::from("  c               - 清理项目依赖"),
             Line::from("  i               - 切换忽略状态"),
+            Line::from("  e               - 使用nvim编辑项目"),
             Line::from(""),
             Line::from(vec![
                 Span::styled("鼠标操作:", Style::default().add_modifier(Modifier::BOLD))
@@ -1122,5 +1148,69 @@ impl App {
             
             calculate_size(&dir)
         }).await?
+    }
+    
+    /// 暂停终端（为启动外部编辑器做准备）
+    fn suspend_terminal() -> Result<()> {
+        // 离开备用屏幕
+        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+        // 禁用原始模式
+        disable_raw_mode()?;
+        Ok(())
+    }
+    
+    /// 恢复终端（从外部编辑器返回后）
+    fn restore_terminal() -> Result<()> {
+        // 启用原始模式
+        enable_raw_mode()?;
+        // 进入备用屏幕
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+        Ok(())
+    }
+    
+    /// 使用nvim打开项目目录  
+    async fn spawn_nvim(&mut self, project_path: &std::path::Path) -> Result<bool> {
+        use std::process::Command;
+        
+        // 设置状态为外部编辑器
+        self.state = AppState::ExternalEditor;
+        
+        // 暂停事件处理器
+        self.event_handler.pause();
+        
+        // 暂停终端
+        Self::suspend_terminal()?;
+        
+        // 启动nvim（设置工作目录为项目路径）
+        let status = Command::new("nvim")
+            .current_dir(project_path)  // 设置工作目录
+            .arg(".")                   // 在当前目录打开
+            .status();
+        
+        // 恢复终端
+        Self::restore_terminal()?;
+        
+        // 恢复事件处理器
+        self.event_handler.resume();
+        
+        // 恢复到项目列表状态
+        self.state = AppState::ProjectList;
+        
+        match status {
+            Ok(exit_status) => {
+                if exit_status.success() {
+                    self.status_message = "已完成编辑".to_string();
+                } else {
+                    self.status_message = "编辑器异常退出".to_string();
+                }
+            }
+            Err(e) => {
+                self.status_message = format!("启动nvim失败: {}. 请确保nvim已安装", e);
+                return Err(anyhow::anyhow!("启动nvim失败: {}", e));
+            }
+        }
+        
+        // 返回true表示需要重绘界面
+        Ok(true)
     }
 }

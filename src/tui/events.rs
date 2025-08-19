@@ -77,6 +77,9 @@ pub struct EventHandler {
     
     /// 事件处理任务句柄
     handler: Option<tokio::task::JoinHandle<()>>,
+    
+    /// 暂停信号发送器
+    pause_sender: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl EventHandler {
@@ -88,18 +91,28 @@ impl EventHandler {
             receiver,
             sender,
             handler: None,
+            pause_sender: None,
         }
     }
     
     /// 启动事件监听
     pub fn start(&mut self) {
         let sender = self.sender.clone();
+        let (pause_tx, pause_rx) = tokio::sync::oneshot::channel();
+        self.pause_sender = Some(pause_tx);
         
         self.handler = Some(tokio::spawn(async move {
             let mut tick_interval = tokio::time::interval(Duration::from_millis(250));
+            let mut pause_rx = pause_rx;
             
             loop {
                 tokio::select! {
+                    // 监听暂停信号
+                    _ = &mut pause_rx => {
+                        // 收到暂停信号，退出事件循环
+                        break;
+                    }
+                    
                     // 处理定时器事件
                     _ = tick_interval.tick() => {
                         if sender.send(Event::Tick).is_err() {
@@ -143,11 +156,30 @@ impl EventHandler {
             .map_err(|_| anyhow::anyhow!("无法发送事件"))
     }
     
+    /// 暂停事件处理（用于启动外部编辑器）
+    pub fn pause(&mut self) {
+        if let Some(pause_sender) = self.pause_sender.take() {
+            let _ = pause_sender.send(()); // 发送暂停信号
+        }
+        // 等待任务结束
+        if let Some(handle) = self.handler.take() {
+            // 不使用abort()，让任务自然结束
+            handle.abort(); // 备用方案，确保任务结束
+        }
+    }
+    
+    /// 恢复事件处理（从外部编辑器返回后）
+    pub fn resume(&mut self) {
+        // 重新启动事件处理
+        self.start();
+    }
+    
     /// 停止事件处理
     pub fn stop(&mut self) {
         if let Some(handle) = self.handler.take() {
             handle.abort();
         }
+        self.pause_sender = None;
     }
 }
 
@@ -221,6 +253,11 @@ pub mod keys {
     pub fn is_tab_key(key: &KeyEvent) -> bool {
         matches!(key.code, KeyCode::Tab)
     }
+    
+    /// 检查是否是nvim编辑键 (e)
+    pub fn is_nvim_key(key: &KeyEvent) -> bool {
+        matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E'))
+    }
 }
 
 #[cfg(test)]
@@ -242,5 +279,12 @@ mod tests {
         assert!(keys::is_up_key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)));
         assert!(keys::is_down_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         assert!(keys::is_down_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn test_nvim_key() {
+        assert!(keys::is_nvim_key(&KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)));
+        assert!(keys::is_nvim_key(&KeyEvent::new(KeyCode::Char('E'), KeyModifiers::NONE)));
+        assert!(!keys::is_nvim_key(&KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
     }
 }
