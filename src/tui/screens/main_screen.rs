@@ -276,10 +276,18 @@ impl MainScreen {
 
         let git_status_cell = Cell::from(git_status_text).style(base_style.fg(git_status_color));
 
-        // 最后修改时间列
-        let modified_time = std::time::SystemTime::UNIX_EPOCH + 
-            std::time::Duration::from_secs(project.last_modified.timestamp() as u64);
-        let time_cell = Cell::from(time_format::format_time(modified_time)).style(base_style.fg(Color::Gray));
+        // 最后修改时间列 - 显示 Git 最后提交时间
+        let time_cell = if let Some(git_info) = &project.git_info {
+            if let Some(last_commit) = git_info.last_commit_time {
+                let commit_time = std::time::SystemTime::UNIX_EPOCH + 
+                    std::time::Duration::from_secs(last_commit.timestamp() as u64);
+                Cell::from(time_format::format_time(commit_time)).style(base_style.fg(Color::Gray))
+            } else {
+                Cell::from("-").style(base_style.fg(Color::Gray))
+            }
+        } else {
+            Cell::from("-").style(base_style.fg(Color::Gray))
+        };
 
         Row::new(vec![
             name_cell,
