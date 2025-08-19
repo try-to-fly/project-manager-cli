@@ -10,6 +10,7 @@ use ratatui::{
 };
 use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{EnableMouseCapture, DisableMouseCapture},
     execute,
 };
 use anyhow::Result;
@@ -121,7 +122,7 @@ impl App {
         // 设置终端
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         
@@ -136,7 +137,7 @@ impl App {
         
         // 恢复终端
         disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
         terminal.show_cursor()?;
         
         result
@@ -157,6 +158,9 @@ impl App {
                     }
                     
                     self.handle_key_event(key).await?;
+                }
+                Event::Mouse(mouse) => {
+                    self.handle_mouse_event(mouse).await?;
                 }
                 Event::Resize(w, h) => {
                     // 终端大小调整会自动处理
@@ -243,6 +247,26 @@ impl App {
         Ok(())
     }
     
+    /// 处理鼠标事件
+    async fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) -> Result<()> {
+        use crossterm::event::{MouseEventKind, MouseButton};
+        
+        match self.state {
+            AppState::ProjectList => {
+                self.handle_project_list_mouse(mouse).await?;
+            }
+            AppState::ProjectDetail => {
+                // 在项目详情页面，点击任意地方返回列表
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    self.state = AppState::ProjectList;
+                }
+            }
+            _ => {}
+        }
+        
+        Ok(())
+    }
+    
     /// 处理键盘事件
     async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         match self.state {
@@ -296,6 +320,59 @@ impl App {
         }
         
         Ok(())
+    }
+    
+    /// 处理项目列表鼠标事件
+    async fn handle_project_list_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Result<()> {
+        use crossterm::event::{MouseEventKind, MouseButton};
+        
+        match mouse.kind {
+            // 左键点击
+            MouseEventKind::Down(MouseButton::Left) => {
+                // 检查是否点击在标签栏区域 (前3行)
+                if mouse.row <= 2 {
+                    self.handle_tab_click(mouse.column);
+                }
+                // 检查是否点击在项目列表区域 (第4行开始，考虑表头)
+                else if mouse.row >= 5 && !self.projects.is_empty() {
+                    // 计算点击的项目索引（减去标签栏和表头的行数）
+                    let clicked_row = mouse.row as usize - 5; // 3行标签栏 + 2行表头边框
+                    if clicked_row < self.projects.len() {
+                        self.selected_project = clicked_row;
+                    }
+                }
+            }
+            // 双击功能需要自己实现，crossterm 没有直接的 DoubleClick 事件
+            // 暂时移除双击功能，可以通过键盘 Enter 进入详情
+            // 滚轮滚动
+            MouseEventKind::ScrollUp => {
+                if self.selected_project > 0 {
+                    self.selected_project -= 1;
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if self.selected_project < self.projects.len().saturating_sub(1) {
+                    self.selected_project += 1;
+                }
+            }
+            _ => {}
+        }
+        
+        Ok(())
+    }
+    
+    /// 处理标签栏点击
+    fn handle_tab_click(&mut self, column: u16) {
+        // 简单的标签点击检测，基于列位置
+        let tab_width = 20; // 假设每个标签大约20个字符宽
+        let tab_index = (column / tab_width) as usize;
+        
+        match tab_index {
+            0 => self.current_tab = TabView::Projects,
+            1 => self.current_tab = TabView::Statistics,
+            2 => self.current_tab = TabView::GitStatus,
+            _ => {} // 超出范围的点击忽略
+        }
     }
     
     /// 处理项目详情键盘事件
@@ -405,7 +482,7 @@ impl App {
                 Span::styled("快捷键:", Style::default().add_modifier(Modifier::BOLD))
             ]),
             Line::from(""),
-            Line::from("  q, ESC, Ctrl+C  - 退出应用程序"),
+            Line::from("  q, Ctrl+C       - 退出应用程序"),
             Line::from("  r, F5           - 刷新项目列表"),
             Line::from("  h, ?, F1        - 显示帮助信息"),
             Line::from("  Tab             - 切换视图标签"),
@@ -415,6 +492,14 @@ impl App {
             Line::from("  d, Delete       - 删除项目"),
             Line::from("  c               - 清理项目依赖"),
             Line::from("  i               - 切换忽略状态"),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("鼠标操作:", Style::default().add_modifier(Modifier::BOLD))
+            ]),
+            Line::from(""),
+            Line::from("  点击            - 选择项目"),
+            Line::from("  滚轮            - 滚动项目列表"),
+            Line::from("  点击标签        - 切换视图"),
             Line::from(""),
             Line::from("按 Enter 或 h 返回项目列表"),
         ];

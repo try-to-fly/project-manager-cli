@@ -1,5 +1,5 @@
 use std::time::Duration;
-use crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use anyhow::Result;
 use tokio::sync::mpsc;
 
@@ -10,6 +10,9 @@ use crate::models::{Project, GitInfo};
 pub enum Event {
     /// 键盘输入事件
     Key(KeyEvent),
+    
+    /// 鼠标事件
+    Mouse(MouseEvent),
     
     /// 终端大小调整事件
     Resize(u16, u16),
@@ -112,6 +115,7 @@ impl EventHandler {
                             if let Ok(event) = event::read() {
                                 let app_event = match event {
                                     event::Event::Key(key) => Event::Key(key),
+                                    event::Event::Mouse(mouse) => Event::Mouse(mouse),
                                     event::Event::Resize(w, h) => Event::Resize(w, h),
                                     _ => continue,
                                 };
@@ -157,12 +161,11 @@ impl Drop for EventHandler {
 pub mod keys {
     use super::*;
     
-    /// 检查是否是退出键 (Ctrl+C, Ctrl+D, ESC, q)
+    /// 检查是否是退出键 (Ctrl+C, Ctrl+D, q)
     pub fn is_quit_key(key: &KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('c') | KeyCode::Char('C') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
             KeyCode::Char('d') | KeyCode::Char('D') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
-            KeyCode::Esc => true,
             KeyCode::Char('q') | KeyCode::Char('Q') => true,
             _ => false,
         }
@@ -228,7 +231,7 @@ mod tests {
     #[test]
     fn test_quit_keys() {
         assert!(keys::is_quit_key(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
-        assert!(keys::is_quit_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!keys::is_quit_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(keys::is_quit_key(&KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
         assert!(!keys::is_quit_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
     }
