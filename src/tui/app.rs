@@ -524,10 +524,16 @@ impl App {
                 }
                 // 检查是否点击在项目列表区域 (第4行开始，考虑表头)
                 else if mouse.row >= 5 && !self.projects.is_empty() {
-                    // 计算点击的项目索引（减去标签栏和表头的行数）
-                    let clicked_row = mouse.row as usize - 5; // 3行标签栏 + 2行表头边框
-                    if clicked_row < self.projects.len() {
-                        self.selected_project = clicked_row;
+                    // 获取当前表格的滚动偏移量
+                    let scroll_offset = self.main_screen.get_table_offset();
+                    
+                    // 计算点击的项目索引（减去标签栏和表头的行数，加上滚动偏移）
+                    let clicked_row_in_view = mouse.row as usize - 5; // 3行标签栏 + 2行表头边框
+                    let clicked_project_index = clicked_row_in_view + scroll_offset;
+                    
+                    // 确保索引在有效范围内
+                    if clicked_project_index < self.projects.len() {
+                        self.selected_project = clicked_project_index;
                     }
                 }
             }

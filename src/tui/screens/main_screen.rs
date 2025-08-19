@@ -25,6 +25,11 @@ impl MainScreen {
         }
     }
     
+    /// 获取表格的滚动偏移量
+    pub fn get_table_offset(&self) -> usize {
+        self.table_state.offset()
+    }
+    
     /// 绘制项目列表视图
     pub fn draw_project_list(
         &mut self,
