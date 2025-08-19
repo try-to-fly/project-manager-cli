@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(cargo init:*)",
+      "Bash(cargo check:*)",
+      "Bash(mkdir:*)",
+      "Bash(cargo test)",
+      "Bash(cargo test:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

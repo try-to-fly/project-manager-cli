@@ -1,0 +1,52 @@
+[package]
+name = "project-manager-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["Claude AI"]
+description = "A CLI tool for scanning and managing code projects"
+
+[dependencies]
+# TUI 框架
+ratatui = "0.29"
+crossterm = "0.28"
+
+# CLI 参数解析
+clap = { version = "4.5", features = ["derive"] }
+
+# 异步运行时
+tokio = { version = "1.0", features = ["full"] }
+
+# 配置文件处理
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# 文件系统操作
+walkdir = "2.5"
+
+# 进度显示
+indicatif = "0.17"
+
+# Git 仓库操作
+git2 = "0.19"
+
+# 文件删除到回收站
+trash = "5.1"
+
+# 错误处理
+anyhow = "1.0"
+
+# 时间处理
+chrono = { version = "0.4", features = ["serde"] }
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# 其他实用工具
+dirs = "5.0"  # 获取用户目录
+ignore = "0.4"  # .gitignore 风格的文件忽略
+regex = "1.0"  # 正则表达式
+
+[dev-dependencies]
+tempfile = "3.0"  # 用于测试的临时文件
