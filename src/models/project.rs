@@ -134,6 +134,24 @@ impl Project {
         self.dependencies.iter().map(|d| d.size).sum()
     }
     
+    /// 获取项目代码大小（不包含依赖）
+    pub fn size(&self) -> u64 {
+        self.code_size
+    }
+    
+    /// 获取文件数量（估算）
+    pub fn file_count(&self) -> usize {
+        // 基于项目大小估算文件数量，平均每个文件 5KB
+        (self.code_size / 5120).max(1) as usize
+    }
+    
+    /// 检查是否有未提交的更改
+    pub fn has_uncommitted_changes(&self) -> bool {
+        self.git_info.as_ref()
+            .map(|info| info.has_uncommitted_changes)
+            .unwrap_or(false)
+    }
+    
     /// 检查是否是 monorepo
     pub fn is_monorepo(&self) -> bool {
         match &self.project_type {
@@ -190,6 +208,21 @@ impl Project {
 }
 
 impl ProjectType {
+    /// 获取项目类型的字符串表示
+    pub fn as_str(&self) -> &str {
+        match self {
+            ProjectType::Git => "git",
+            ProjectType::NodeJs => "nodejs",
+            ProjectType::Rust => "rust",
+            ProjectType::Python => "python",
+            ProjectType::Go => "go",
+            ProjectType::Java => "java",
+            ProjectType::Cpp => "cpp",
+            ProjectType::Mixed(_) => "mixed",
+            ProjectType::Unknown => "unknown",
+        }
+    }
+    
     /// 获取项目类型的优先级（用于排序）
     pub fn priority(&self) -> u8 {
         match self {

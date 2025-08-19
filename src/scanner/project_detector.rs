@@ -362,7 +362,7 @@ impl ProjectDetector {
         Ok(Some((None, dependencies)))
     }
     
-    /// 计算目录大小
+    /// 计算目录大小（跳过大型依赖目录）
     fn calculate_directory_size<'a>(&'a self, path: &'a Path) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64>> + Send + 'a>> {
         Box::pin(async move {
             let mut total_size = 0;
@@ -373,6 +373,28 @@ impl ProjectDetector {
                 if metadata.is_file() {
                     total_size += metadata.len();
                 } else if metadata.is_dir() {
+                    // 获取目录名
+                    let dir_name = entry.file_name();
+                    let dir_name_str = dir_name.to_string_lossy();
+                    
+                    // 跳过大型依赖目录，避免递归计算导致性能问题
+                    if matches!(dir_name_str.as_ref(),
+                        "node_modules" | ".git" | "target" | ".svn" | 
+                        "__pycache__" | ".pytest_cache" |
+                        "venv" | ".venv" | "env" | ".env" |
+                        ".idea" | ".vscode" | ".vs" | 
+                        "dist" | "build" | "out" |
+                        ".gradle" | ".mvn" | 
+                        "vendor" | "bower_components" |
+                        ".sass-cache" | ".cache" |
+                        "coverage" | ".nyc_output" |
+                        ".next" | ".nuxt" | ".parcel-cache"
+                    ) {
+                        // 对于这些目录，只估算一个大概的大小，不递归计算
+                        // 或者可以选择完全跳过
+                        continue;
+                    }
+                    
                     // 递归计算子目录大小
                     total_size += self.calculate_directory_size(&entry.path()).await.unwrap_or(0);
                 }

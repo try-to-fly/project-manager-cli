@@ -11,11 +11,14 @@ use clap::Parser;
 
 use cli::{Cli, Commands};
 use config::Config;
+use tui::app::App;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 初始化日志
-    tracing_subscriber::fmt::init();
+    // 初始化日志，设置日志级别为 INFO
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
     
     let cli = Cli::parse();
     
@@ -36,8 +39,14 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Tui { paths } => {
-            println!("TUI 功能待实现");
-            println!("初始路径: {:?}", paths);
+            let scan_paths = if paths.is_empty() {
+                vec![std::env::current_dir()?.display().to_string()]
+            } else {
+                paths
+            };
+            
+            let mut app = App::new(config, scan_paths);
+            app.run().await?;
         }
         Commands::Clean { project_path, clean_type, force } => {
             println!("清理功能待实现");

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 use anyhow::Result;
 use tokio::sync::mpsc;
 use walkdir::WalkDir;
@@ -166,50 +167,130 @@ impl FileWalker {
         progress: &mut ScanProgress,
         tx: &mpsc::Sender<ScanResult>,
     ) -> Result<()> {
-        let mut walker = WalkDir::new(root_path);
+        tracing::info!("开始扫描目录: {}", root_path.display());
         
-        // 配置遍历选项
-        if let Some(max_depth) = self.max_depth {
-            walker = walker.max_depth(max_depth);
-        }
+        // 用于追踪已发现的项目路径，避免重复扫描子项目
+        let mut discovered_projects: HashSet<PathBuf> = HashSet::new();
         
-        if !self.follow_symlinks {
-            walker = walker.follow_links(false);
-        }
+        // 配置 WalkDir，使用 filter_entry 在进入目录前过滤
+        let walker = WalkDir::new(root_path)
+            .follow_links(self.follow_symlinks)
+            .max_depth(self.max_depth.unwrap_or(usize::MAX))
+            .into_iter()
+            .filter_entry(|entry| {
+                // 在进入目录前就决定是否要遍历
+                let path = entry.path();
+                
+                // 只过滤目录，不过滤文件
+                if !entry.file_type().is_dir() {
+                    return true;
+                }
+                
+                // 获取目录名
+                let dir_name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(name) => name,
+                    None => return true,
+                };
+                
+                // 跳过应该完全忽略的目录（如 node_modules、.git 等）
+                // 这些目录完全不需要进入扫描，可以大幅提升性能
+                let should_skip = matches!(dir_name,
+                    "node_modules" | ".git" | "target" | ".svn" | 
+                    "__pycache__" | ".pytest_cache" |
+                    "venv" | ".venv" | "env" | ".env" |
+                    ".idea" | ".vscode" | ".vs" | 
+                    "dist" | "build" | "out" |
+                    ".gradle" | ".mvn" | 
+                    "vendor" | "bower_components" |
+                    ".sass-cache" | ".cache" |
+                    "coverage" | ".nyc_output" |
+                    ".next" | ".nuxt" | ".parcel-cache"
+                );
+                
+                if should_skip {
+                    tracing::debug!("跳过目录（filter_entry）: {}", path.display());
+                }
+                
+                !should_skip
+            });
         
-        // 遍历目录
-        for entry in walker.into_iter() {
+        let mut entry_count = 0;
+        
+        // 遍历过滤后的目录
+        for entry in walker {
+            entry_count += 1;
+            
+            // 每处理100个条目打印一次日志
+            if entry_count % 100 == 0 {
+                tracing::info!("已处理 {} 个条目，当前进度: {} 个目录", entry_count, progress.scanned_dirs);
+            }
+            
             match entry {
                 Ok(entry) => {
                     let path = entry.path();
+                    
+                    // 记录详细日志
+                    if entry.file_type().is_dir() {
+                        tracing::debug!("处理目录: {}", path.display());
+                    } else {
+                        // 如果卡在某个文件上，这个日志会帮助我们发现
+                        if path.to_string_lossy().contains("poetry.lock") {
+                            tracing::warn!("正在处理 poetry.lock 文件: {}", path.display());
+                        }
+                    }
                     
                     // 更新当前扫描路径
                     progress.current_path = Some(path.to_path_buf());
                     
                     // 发送进度更新
                     if let Err(_) = tx.send(ScanResult::Progress(progress.clone())).await {
+                        tracing::warn!("接收端已关闭，停止扫描");
                         break; // 接收端已关闭
                     }
                     
                     if entry.file_type().is_dir() {
                         progress.scanned_dirs += 1;
                         
-                        // 检查是否应该忽略此目录
+                        // 检查是否在已发现的项目内部
+                        if self.is_inside_discovered_project(path, &discovered_projects) {
+                            tracing::debug!("跳过子项目目录: {}", path.display());
+                            // 跳过已发现项目的子目录，避免重复识别
+                            continue;
+                        }
+                        
+                        // 检查是否应该忽略此目录（用于其他忽略规则）
                         if self.should_ignore_directory(path) {
+                            tracing::debug!("忽略目录: {}", path.display());
                             progress.skipped_dirs += 1;
                             continue;
                         }
                         
                         // 检测是否是项目
-                        if let Ok(Some(detected_project)) = self.project_detector.detect_project(path).await {
-                            // 发送发现的项目
-                            if let Err(_) = tx.send(ScanResult::Project(detected_project)).await {
-                                break; // 接收端已关闭
+                        tracing::debug!("开始检测项目: {}", path.display());
+                        match self.project_detector.detect_project(path).await {
+                            Ok(Some(detected_project)) => {
+                                tracing::info!("发现项目: {} at {}", detected_project.name, path.display());
+                                // 记录已发现的项目路径
+                                discovered_projects.insert(path.to_path_buf());
+                                
+                                // 发送发现的项目
+                                if let Err(_) = tx.send(ScanResult::Project(detected_project)).await {
+                                    tracing::warn!("发送项目失败，接收端已关闭");
+                                    break; // 接收端已关闭
+                                }
+                            }
+                            Ok(None) => {
+                                // 不是项目，继续
+                            }
+                            Err(e) => {
+                                tracing::warn!("检测项目时出错 {}: {}", path.display(), e);
                             }
                         }
+                        tracing::debug!("完成检测项目: {}", path.display());
                     }
                 }
                 Err(err) => {
+                    tracing::error!("遍历目录时出错: {}", err);
                     // 发送错误
                     let _ = tx.send(ScanResult::Error(
                         anyhow::anyhow!("遍历目录时出错: {}", err)
@@ -218,17 +299,30 @@ impl FileWalker {
             }
         }
         
+        tracing::info!("扫描完成，共处理 {} 个条目，扫描了 {} 个目录", entry_count, progress.scanned_dirs);
         Ok(())
     }
     
-    /// 检查是否应该忽略指定目录
+    
+    /// 检查路径是否在已发现的项目内部
+    fn is_inside_discovered_project(&self, path: &Path, discovered_projects: &HashSet<PathBuf>) -> bool {
+        for project_path in discovered_projects {
+            // 如果当前路径是某个已发现项目的子路径（但不是项目本身）
+            if path.starts_with(project_path) && path != project_path {
+                return true;
+            }
+        }
+        false
+    }
+    
+    /// 检查是否应该忽略指定目录（用于其他忽略规则）
     fn should_ignore_directory(&self, path: &Path) -> bool {
         let file_name = match path.file_name().and_then(|n| n.to_str()) {
             Some(name) => name,
             None => return false,
         };
         
-        // 检查是否在忽略目录列表中
+        // 检查是否在配置的忽略目录列表中
         if self.config.ignore.directories.contains(file_name) {
             return true;
         }
@@ -248,10 +342,7 @@ impl FileWalker {
         
         // 不扫描隐藏目录（除非配置允许）
         if !self.config.scan.scan_hidden && file_name.starts_with('.') {
-            // 但是要扫描 .git 目录的父目录
-            if file_name != ".git" {
-                return true;
-            }
+            return true;
         }
         
         false
