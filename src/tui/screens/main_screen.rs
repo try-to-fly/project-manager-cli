@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs},
+    widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, TableState, Tabs},
     Frame,
 };
 
@@ -13,15 +13,15 @@ use crate::models::DependencyCalculationStatus;
 
 /// 主屏幕组件 - 负责绘制项目列表和详情页面
 pub struct MainScreen {
-    /// 列表状态
-    list_state: ListState,
+    /// 表格状态
+    table_state: TableState,
 }
 
 impl MainScreen {
     /// 创建新的主屏幕
     pub fn new() -> Self {
         Self {
-            list_state: ListState::default(),
+            table_state: TableState::default(),
         }
     }
     
@@ -137,104 +137,160 @@ impl MainScreen {
             f.render_widget(empty_message, area);
             return;
         }
-        
-        // 创建项目列表项
-        let items: Vec<ListItem> = projects
+
+        // 定义列宽约束
+        let constraints = [
+            Constraint::Min(25),      // 项目名称
+            Constraint::Length(15),   // 语言 
+            Constraint::Length(12),   // 大小
+            Constraint::Length(16),   // 依赖
+            Constraint::Length(10),   // Git状态
+            Constraint::Min(20),      // 最后修改
+        ];
+
+        // 创建表头
+        let header = Row::new(vec![
+            Cell::from("项目名称"),
+            Cell::from("语言"),
+            Cell::from("大小"),
+            Cell::from("依赖"),
+            Cell::from("Git状态"),
+            Cell::from("最后修改"),
+        ])
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .height(1);
+
+        // 创建数据行
+        let rows: Vec<Row> = projects
             .iter()
             .enumerate()
-            .map(|(i, project)| {
-                let style = if project.is_ignored {
+            .map(|(_i, project)| {
+                let row_style = if project.is_ignored {
                     Style::default().fg(Color::Gray)
-                } else if i == selected_index {
-                    Style::default().bg(Color::Blue).fg(Color::White)
                 } else {
                     Style::default().fg(Color::White)
                 };
                 
-                // 构建项目信息行
-                let mut spans = vec![
-                    Span::styled(
-                        format!("{:<30}", project.name),
-                        style.add_modifier(Modifier::BOLD)
-                    ),
-                ];
-                
-                // 添加项目类型图标
-                let type_icon = match project.project_type.as_str() {
-                    "git" => "📁",
-                    "nodejs" => "📦",
-                    "python" => "🐍",
-                    "rust" => "🦀",
-                    "go" => "🐹",
-                    "java" => "☕",
-                    "cpp" => "⚡",
-                    _ => "📄",
-                };
-                
-                spans.push(Span::styled(
-                    format!(" {} ", type_icon),
-                    style
-                ));
-                
-                // 添加大小信息
-                spans.push(Span::styled(
-                    format!("{:<12}", size_format::format_size(project.size())),
-                    style
-                ));
-                
-                // 添加最后修改时间
-                let modified_time = std::time::SystemTime::UNIX_EPOCH + 
-                    std::time::Duration::from_secs(project.last_modified.timestamp() as u64);
-                spans.push(Span::styled(
-                    format!(" {}", time_format::format_time(modified_time)),
-                    style.fg(Color::Gray)
-                ));
-                
-                // 添加状态标识
-                if project.is_ignored {
-                    spans.push(Span::styled(" [已忽略]", Style::default().fg(Color::Red)));
-                }
-                
-                if project.has_uncommitted_changes() {
-                    spans.push(Span::styled(" [未提交]", Style::default().fg(Color::Yellow)));
-                }
-                
-                // 添加依赖计算状态
-                let dependency_status = project.dependency_status_display();
-                if !dependency_status.is_empty() {
-                    let status_color = match project.dependency_calculation_status {
-                        DependencyCalculationStatus::Calculating => Color::Cyan,
-                        DependencyCalculationStatus::NotCalculated => Color::Gray,
-                        DependencyCalculationStatus::Failed(_) => Color::Red,
-                        _ => Color::Gray,
-                    };
-                    spans.push(Span::styled(
-                        format!(" [{}]", dependency_status), 
-                        Style::default().fg(status_color)
-                    ));
-                }
-                
-                ListItem::new(Line::from(spans))
+                Self::create_project_row(project, row_style)
             })
             .collect();
-        
-        // 更新列表状态
-        self.list_state.select(Some(selected_index));
-        
-        let list = List::new(items)
+
+        // 更新表格状态
+        self.table_state.select(Some(selected_index));
+
+        // 创建表格
+        let table = Table::new(rows, constraints)
+            .header(header)
             .block(
                 Block::default()
                     .title(format!("项目列表 ({} 个项目)", projects.len()))
                     .borders(Borders::ALL)
             )
-            .highlight_style(
+            .column_spacing(1)
+            .row_highlight_style(
                 Style::default()
                     .bg(Color::Blue)
                     .add_modifier(Modifier::BOLD)
             );
-        
-        f.render_stateful_widget(list, area, &mut self.list_state);
+
+        f.render_stateful_widget(table, area, &mut self.table_state);
     }
+
+    /// 创建项目数据行
+    fn create_project_row(project: &Project, base_style: Style) -> Row {
+        // 项目名称
+        let project_name = if project.name.len() > 23 {
+            format!("{}...", &project.name[..20])
+        } else {
+            project.name.clone()
+        };
+        let mut name_cell = Cell::from(project_name).style(base_style.add_modifier(Modifier::BOLD));
+        
+        // 如果项目被忽略，添加标识
+        if project.is_ignored {
+            name_cell = name_cell.style(base_style.add_modifier(Modifier::BOLD).fg(Color::Gray));
+        }
+
+        // 语言列 - icon + 名称
+        let (type_icon, type_name) = match project.project_type.as_str() {
+            "git" => ("📁", "Git"),
+            "nodejs" => ("📦", "Node.js"),
+            "python" => ("🐍", "Python"), 
+            "rust" => ("🦀", "Rust"),
+            "go" => ("🐹", "Go"),
+            "java" => ("☕", "Java"),
+            "cpp" => ("⚡", "C++"),
+            _ => ("📄", "Other"),
+        };
+        let language_cell = Cell::from(format!("{} {}", type_icon, type_name)).style(base_style);
+
+        // 大小列
+        let size_cell = Cell::from(size_format::format_size(project.size())).style(base_style);
+
+        // 依赖列
+        let dependency_text = if project.dependency_size() > 0 {
+            let dependency_status = project.dependency_status_display();
+            let size_str = size_format::format_size(project.dependency_size());
+            if dependency_status.is_empty() {
+                size_str
+            } else {
+                let short_status = match dependency_status {
+                    "等待计算" => "待算",
+                    "计算中..." => "计算中",
+                    "计算失败" => "失败",
+                    _ => dependency_status,
+                };
+                format!("{}({})", size_str, short_status)
+            }
+        } else {
+            "-".to_string()
+        };
+
+        let dependency_color = match project.dependency_calculation_status {
+            DependencyCalculationStatus::Calculating => Color::Cyan,
+            DependencyCalculationStatus::NotCalculated => Color::Gray,
+            DependencyCalculationStatus::Failed(_) => Color::Red,
+            _ => base_style.fg.unwrap_or(Color::White),
+        };
+        
+        let dependency_cell = Cell::from(dependency_text).style(base_style.fg(dependency_color));
+
+        // Git状态列
+        let git_status_text = if project.git_info.is_some() {
+            if project.has_uncommitted_changes() {
+                "未提交"
+            } else {
+                "清洁"
+            }
+        } else {
+            "-"
+        };
+
+        let git_status_color = if project.has_uncommitted_changes() {
+            Color::Red
+        } else if project.git_info.is_some() {
+            Color::Green
+        } else {
+            Color::Gray
+        };
+
+        let git_status_cell = Cell::from(git_status_text).style(base_style.fg(git_status_color));
+
+        // 最后修改时间列
+        let modified_time = std::time::SystemTime::UNIX_EPOCH + 
+            std::time::Duration::from_secs(project.last_modified.timestamp() as u64);
+        let time_cell = Cell::from(time_format::format_time(modified_time)).style(base_style.fg(Color::Gray));
+
+        Row::new(vec![
+            name_cell,
+            language_cell,
+            size_cell,
+            dependency_cell,
+            git_status_cell,
+            time_cell,
+        ])
+    }
+
     
     /// 绘制统计信息视图
     fn draw_statistics_view(&self, f: &mut Frame, area: Rect, projects: &[Project]) {
