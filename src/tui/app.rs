@@ -15,7 +15,7 @@ use crossterm::{
 use anyhow::Result;
 
 use crate::config::Config;
-use crate::models::Project;
+use crate::models::{Project, DependencyCalculationStatus};
 use crate::scanner::FileWalker;
 use crate::tui::events::{Event, EventHandler, keys};
 use crate::tui::screens::MainScreen;
@@ -171,11 +171,57 @@ impl App {
                 Event::ProjectFound(project) => {
                     self.projects.push(project);
                 }
-                Event::ProjectSizeUpdated { project_index, code_size, total_size } => {
+                Event::ProjectSizeUpdated { 
+                    project_index, 
+                    code_size, 
+                    total_size, 
+                    gitignore_excluded_size,
+                    code_file_count,
+                    dependency_file_count,
+                    total_file_count,
+                    gitignore_excluded_file_count,
+                } => {
                     // 更新指定项目的大小信息
                     if let Some(project) = self.projects.get_mut(project_index) {
                         project.code_size = code_size;
                         project.total_size = total_size;
+                        project.gitignore_excluded_size = gitignore_excluded_size;
+                        project.code_file_count = code_file_count;
+                        project.dependency_file_count = dependency_file_count;
+                        project.total_file_count = total_file_count;
+                        project.gitignore_excluded_file_count = gitignore_excluded_file_count;
+                    }
+                }
+                Event::ProjectDetailsUpdated {
+                    project_name,
+                    code_size,
+                    dependency_size,
+                    total_size,
+                    gitignore_excluded_size,
+                    code_file_count,
+                    dependency_file_count,
+                    total_file_count,
+                    gitignore_excluded_file_count,
+                    git_info,
+                } => {
+                    // 找到对应的项目并更新其详细信息
+                    if let Some(project) = self.projects.iter_mut().find(|p| p.name == project_name) {
+                        project.code_size = code_size;
+                        project.total_size = total_size;
+                        project.gitignore_excluded_size = gitignore_excluded_size;
+                        project.code_file_count = code_file_count;
+                        project.dependency_file_count = dependency_file_count;
+                        project.total_file_count = total_file_count;
+                        project.gitignore_excluded_file_count = gitignore_excluded_file_count;
+                        project.git_info = git_info;
+                        project.cached_dependency_size = Some(dependency_size); // 更新缓存的依赖大小
+                        project.dependency_calculation_status = DependencyCalculationStatus::Completed;
+                    }
+                }
+                Event::ProjectCalculationStarted { project_name } => {
+                    // 找到对应的项目并标记为计算中状态
+                    if let Some(project) = self.projects.iter_mut().find(|p| p.name == project_name) {
+                        project.dependency_calculation_status = DependencyCalculationStatus::Calculating;
                     }
                 }
                 Event::Refresh => {
@@ -533,14 +579,35 @@ impl App {
                     project_type: self.detect_project_type(&current_dir).await,
                     code_size: 0,
                     total_size: 0,
+                    gitignore_excluded_size: 0,
+                    code_file_count: 0,
+                    dependency_file_count: 0,
+                    total_file_count: 0,
+                    gitignore_excluded_file_count: 0,
                     last_modified: chrono::Utc::now(),
                     git_info: None,
                     dependencies: Vec::new(),
                     is_ignored: false,
                     description: None,
+                    dependency_calculation_status: DependencyCalculationStatus::NotCalculated,
+                    cached_dependency_size: None,
                 };
                 
-                self.projects.push(project);
+                self.projects.push(project.clone());
+                
+                // 为当前目录项目也启动异步计算详细信息
+                let project_path = current_dir.clone();
+                let project_name = project.name.clone();
+                let sender = self.event_handler.sender.clone();
+                
+                tokio::spawn(async move {
+                    // 先发送开始计算事件
+                    let _ = sender.send(Event::ProjectCalculationStarted {
+                        project_name: project_name.clone(),
+                    });
+                    
+                    Self::calculate_project_details(project_path, project_name, sender).await;
+                });
                 
                 // 发现项目后不再扫描其子目录
                 continue;
@@ -620,7 +687,13 @@ impl App {
         // 在后台异步计算每个项目的大小
         tokio::spawn(async move {
             use crate::scanner::SizeCalculator;
-            let size_calculator = SizeCalculator::new();
+            use crate::config::Config;
+            
+            // 加载配置并创建带缓存的大小计算器
+            let config = Config::load_or_create_default().unwrap_or_default();
+            let mut size_calculator = SizeCalculator::new_with_cache(config.cache.to_size_cache_config())
+                .await
+                .unwrap_or_else(|_| SizeCalculator::new());
             
             for (index, project) in projects_for_calc.iter().enumerate() {
                 // 计算项目大小
@@ -630,6 +703,11 @@ impl App {
                         project_index: index,
                         code_size: size_info.code_size,
                         total_size: size_info.total_size,
+                        gitignore_excluded_size: size_info.gitignore_excluded_size,
+                        code_file_count: size_info.code_file_count,
+                        dependency_file_count: size_info.dependency_file_count,
+                        total_file_count: size_info.total_file_count,
+                        gitignore_excluded_file_count: size_info.gitignore_excluded_file_count,
                     });
                 }
                 
@@ -663,18 +741,31 @@ impl App {
                 Ok(detected_projects) => {
                     tracing::info!("FileWalker 返回了 {} 个检测到的项目", detected_projects.len());
                     for detected in detected_projects {
-                        // 快速创建项目对象，不进行耗时的大小计算和 Git 分析
+                        // 立即计算依赖大小（基于已检测的依赖信息）
+                        let immediate_dependency_size: u64 = detected.dependencies.iter().map(|d| d.size).sum();
+                        let dependency_file_count: usize = detected.dependencies.iter().map(|d| d.package_count.unwrap_or(0)).sum();
+                        
+                        // 快速创建项目对象，显示初始依赖大小
                         let project = Project {
                             name: detected.name.clone(),
                             path: detected.path.clone(),
                             project_type: detected.project_type,
                             code_size: 0, // 稍后异步计算
-                            total_size: 0, // 稍后异步计算
+                            total_size: immediate_dependency_size, // 使用立即计算的依赖大小
+                            gitignore_excluded_size: 0, // 稍后异步计算
+                            code_file_count: 0, // 稍后异步计算
+                            dependency_file_count, // 使用立即计算的依赖文件数
+                            total_file_count: dependency_file_count, // 临时使用依赖文件数
+                            gitignore_excluded_file_count: 0, // 稍后异步计算
                             last_modified: chrono::Utc::now(), // 使用当前时间作为默认值
                             git_info: None, // 稍后异步分析
                             dependencies: detected.dependencies,
                             is_ignored: false,
                             description: detected.description,
+                            // 总是设为未计算状态，即使有立即计算的依赖大小
+                            // 这样用户能看到"等待计算"状态，然后看到异步计算的进度
+                            dependency_calculation_status: DependencyCalculationStatus::NotCalculated,
+                            cached_dependency_size: Some(immediate_dependency_size), // 使用立即计算的依赖大小作为初始值
                         };
                         
                         // 立即发送项目，让用户能快速看到项目列表
@@ -689,7 +780,16 @@ impl App {
                         let project_name = detected.name.clone();
                         let sender = progress_sender.clone();
                         
+                        // 标记项目为正在计算状态
+                        let sender_for_status = progress_sender.clone();
+                        let project_name_for_status = detected.name.clone();
+                        
                         tokio::spawn(async move {
+                            // 先发送开始计算事件，更新项目状态
+                            let _ = sender_for_status.send(Event::ProjectCalculationStarted {
+                                project_name: project_name_for_status,
+                            });
+                            
                             Self::calculate_project_details(project_path, project_name, sender).await;
                         });
                     }
@@ -712,23 +812,63 @@ impl App {
         progress_sender: mpsc::UnboundedSender<Event>
     ) {
         use crate::scanner::{GitAnalyzer, SizeCalculator};
+        use crate::config::Config;
+        
+        // 通知开始计算
+        let _ = progress_sender.send(Event::ScanProgress(
+            format!("开始计算 {} 的详细信息...", project_name)
+        ));
         
         let git_analyzer = GitAnalyzer::new();
-        let size_calculator = SizeCalculator::new();
+        
+        // 加载配置并创建带缓存的大小计算器
+        let config = Config::load_or_create_default().unwrap_or_default();
+        let mut size_calculator = SizeCalculator::new_with_cache(config.cache.to_size_cache_config())
+            .await
+            .unwrap_or_else(|_| SizeCalculator::new());
+        
+        // 通知开始分析Git信息
+        let _ = progress_sender.send(Event::ScanProgress(
+            format!("分析 {} 的Git信息...", project_name)
+        ));
         
         // 分析 Git 信息（相对较快）
         let git_info = git_analyzer.analyze_repository(&project_path).unwrap_or(None);
         
-        // 计算项目大小（可能较慢）
-        let size_info = size_calculator.calculate_project_size(&project_path).await.unwrap_or_default();
-        
-        // 发送更新后的项目信息
+        // 通知开始计算大小
         let _ = progress_sender.send(Event::ScanProgress(
-            format!("已分析项目详情: {}", project_name)
+            format!("计算 {} 的项目大小...", project_name)
         ));
         
-        // 这里可以考虑发送一个新的事件类型来更新已有项目的详细信息
-        // 例如: Event::ProjectUpdated { name, git_info, size_info }
+        // 计算项目大小（可能较慢）
+        match size_calculator.calculate_project_size(&project_path).await {
+            Ok(size_info) => {
+                // 发送详细信息更新事件
+                let _ = progress_sender.send(Event::ProjectDetailsUpdated {
+                    project_name: project_name.clone(),
+                    code_size: size_info.code_size,
+                    dependency_size: size_info.dependency_size,
+                    total_size: size_info.total_size,
+                    gitignore_excluded_size: size_info.gitignore_excluded_size,
+                    code_file_count: size_info.code_file_count,
+                    dependency_file_count: size_info.dependency_file_count,
+                    total_file_count: size_info.total_file_count,
+                    gitignore_excluded_file_count: size_info.gitignore_excluded_file_count,
+                    git_info,
+                });
+                
+                // 发送完成消息
+                let _ = progress_sender.send(Event::ScanProgress(
+                    format!("已完成 {} 的详细信息计算", project_name)
+                ));
+            }
+            Err(e) => {
+                // 计算失败的情况
+                let _ = progress_sender.send(Event::ScanProgress(
+                    format!("计算 {} 的详细信息失败: {}", project_name, e)
+                ));
+            }
+        }
     }
     
     /// 切换视图标签

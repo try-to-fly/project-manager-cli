@@ -4,6 +4,9 @@ use anyhow::Result;
 use tokio::fs;
 use std::fs::Metadata;
 
+use super::git_ignore_analyzer::{GitIgnoreAnalyzer, IgnoreStats};
+use super::size_cache::{SizeCache, CachedSizeInfo, CacheConfig, CacheStatus};
+
 /// 大小计算器 - 负责计算项目的代码大小和依赖大小
 pub struct SizeCalculator {
     /// 需要忽略的目录（通常是依赖目录）
@@ -11,6 +14,9 @@ pub struct SizeCalculator {
     
     /// 需要忽略的文件扩展名
     ignore_extensions: HashSet<String>,
+    
+    /// 缓存管理器（可选）
+    cache: Option<SizeCache>,
 }
 
 /// 项目大小统计结果
@@ -25,6 +31,9 @@ pub struct ProjectSizeInfo {
     /// 项目总大小（包含所有文件）
     pub total_size: u64,
     
+    /// 被 gitignore 排除的文件大小（不含依赖目录，避免重复计算）
+    pub gitignore_excluded_size: u64,
+    
     /// 代码文件数量
     pub code_file_count: usize,
     
@@ -33,6 +42,9 @@ pub struct ProjectSizeInfo {
     
     /// 总文件数量
     pub total_file_count: usize,
+    
+    /// 被 gitignore 排除的文件数量（不含依赖目录）
+    pub gitignore_excluded_file_count: usize,
     
     /// 最后修改时间
     pub last_modified: Option<std::time::SystemTime>,
@@ -60,7 +72,23 @@ impl SizeCalculator {
         Self {
             ignore_dirs: Self::default_ignore_dirs(),
             ignore_extensions: Self::default_ignore_extensions(),
+            cache: None,
         }
+    }
+    
+    /// 创建带缓存的大小计算器
+    pub async fn new_with_cache(cache_config: CacheConfig) -> Result<Self> {
+        let cache = if cache_config.enabled {
+            Some(SizeCache::new(cache_config).await?)
+        } else {
+            None
+        };
+        
+        Ok(Self {
+            ignore_dirs: Self::default_ignore_dirs(),
+            ignore_extensions: Self::default_ignore_extensions(),
+            cache,
+        })
     }
     
     /// 使用自定义忽略规则创建计算器
@@ -71,20 +99,75 @@ impl SizeCalculator {
         Self {
             ignore_dirs,
             ignore_extensions,
+            cache: None,
         }
     }
     
+    /// 使用自定义忽略规则和缓存创建计算器
+    pub async fn with_custom_ignore_and_cache(
+        ignore_dirs: HashSet<String>,
+        ignore_extensions: HashSet<String>,
+        cache_config: CacheConfig,
+    ) -> Result<Self> {
+        let cache = if cache_config.enabled {
+            Some(SizeCache::new(cache_config).await?)
+        } else {
+            None
+        };
+        
+        Ok(Self {
+            ignore_dirs,
+            ignore_extensions,
+            cache,
+        })
+    }
+    
     /// 计算项目的完整大小信息
-    pub async fn calculate_project_size(&self, project_path: &Path) -> Result<ProjectSizeInfo> {
+    pub async fn calculate_project_size(&mut self, project_path: &Path) -> Result<ProjectSizeInfo> {
+        // 先尝试从缓存获取
+        if let Some(ref cache) = self.cache {
+            if let Some(cached_info) = cache.get(project_path).await {
+                return Ok(self.convert_cached_to_project_size_info(cached_info));
+            }
+        }
+        
+        // 缓存未命中，重新计算
+        let size_info = self.calculate_project_size_fresh(project_path).await?;
+        
+        // 将结果存入缓存
+        if self.cache.is_some() {
+            let git_analyzer = GitIgnoreAnalyzer::new(project_path)?;
+            let is_git_repo = git_analyzer.is_git_repository();
+            let cached_info = self.convert_project_size_info_to_cached(&size_info);
+            
+            if let Some(ref mut cache) = self.cache {
+                cache.put(project_path, cached_info, is_git_repo).await?;
+            }
+        }
+        
+        Ok(size_info)
+    }
+    
+    /// 重新计算项目大小（跳过缓存）
+    async fn calculate_project_size_fresh(&self, project_path: &Path) -> Result<ProjectSizeInfo> {
+        // 创建 Git 忽略分析器
+        let git_analyzer = GitIgnoreAnalyzer::new(project_path)?;
+        
         let mut size_info = ProjectSizeInfo::default();
         
-        self.calculate_directory_recursive(project_path, &mut size_info).await?;
+        if git_analyzer.is_git_repository() {
+            // Git 项目：使用 gitignore 规则
+            self.calculate_git_project_size(project_path, &git_analyzer, &mut size_info).await?;
+        } else {
+            // 非 Git 项目：使用传统方式
+            self.calculate_directory_recursive(project_path, &mut size_info).await?;
+        }
         
         Ok(size_info)
     }
     
     /// 只计算代码大小（排除依赖）
-    pub async fn calculate_code_size(&self, project_path: &Path) -> Result<u64> {
+    pub async fn calculate_code_size(&mut self, project_path: &Path) -> Result<u64> {
         let size_info = self.calculate_project_size(project_path).await?;
         Ok(size_info.code_size)
     }
@@ -333,6 +416,113 @@ impl SizeCalculator {
         
         Ok(dependency_dirs)
     }
+    
+    /// 计算 Git 项目大小（使用 gitignore 规则）
+    async fn calculate_git_project_size(
+        &self,
+        project_path: &Path,
+        git_analyzer: &GitIgnoreAnalyzer,
+        size_info: &mut ProjectSizeInfo,
+    ) -> Result<()> {
+        // 首先处理被 git 跟踪的文件
+        let entries = git_analyzer.get_walkable_entries()?;
+        
+        for entry_path in entries {
+            let metadata = match fs::metadata(&entry_path).await {
+                Ok(m) => m,
+                Err(_) => continue, // 跳过无法访问的文件
+            };
+            
+            if metadata.is_file() {
+                self.process_file(&entry_path, &metadata, size_info).await?;
+            }
+        }
+        
+        // 然后处理被忽略的依赖目录
+        let mut entries = fs::read_dir(project_path).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            
+            if path.is_dir() && self.is_dependency_directory(&path) {
+                // 检查该目录是否被 git 忽略
+                if git_analyzer.should_ignore(&path) {
+                    let dep_info = self.calculate_directory_size(&path).await?;
+                    size_info.dependency_size += dep_info.size;
+                    size_info.dependency_file_count += dep_info.file_count;
+                    size_info.total_size += dep_info.size;
+                    size_info.total_file_count += dep_info.file_count;
+                }
+            }
+        }
+        
+        // 最后计算被 gitignore 排除的其他文件大小（排除依赖目录避免重复计算）
+        let exclude_deps = ["node_modules", "target", "build", "dist", "out", "bin", "obj", 
+                           "__pycache__", "venv", "env", ".venv", ".env", "site-packages",
+                           ".git", ".svn", ".hg", ".vscode", ".idea", ".vs", "vendor", "bower_components"];
+        let (gitignore_size, gitignore_count) = git_analyzer
+            .calculate_ignored_files_size_exclude_dependencies(&exclude_deps).await?;
+        
+        size_info.gitignore_excluded_size = gitignore_size;
+        size_info.gitignore_excluded_file_count = gitignore_count;
+        
+        Ok(())
+    }
+    
+    /// 将 ProjectSizeInfo 转换为 CachedSizeInfo
+    fn convert_project_size_info_to_cached(&self, size_info: &ProjectSizeInfo) -> CachedSizeInfo {
+        CachedSizeInfo {
+            code_size: size_info.code_size,
+            dependency_size: size_info.dependency_size,
+            total_size: size_info.total_size,
+            gitignore_excluded_size: size_info.gitignore_excluded_size,
+            code_file_count: size_info.code_file_count,
+            dependency_file_count: size_info.dependency_file_count,
+            total_file_count: size_info.total_file_count,
+            gitignore_excluded_file_count: size_info.gitignore_excluded_file_count,
+            last_modified: size_info.last_modified,
+        }
+    }
+    
+    /// 将 CachedSizeInfo 转换为 ProjectSizeInfo
+    fn convert_cached_to_project_size_info(&self, cached_info: CachedSizeInfo) -> ProjectSizeInfo {
+        ProjectSizeInfo {
+            code_size: cached_info.code_size,
+            dependency_size: cached_info.dependency_size,
+            total_size: cached_info.total_size,
+            gitignore_excluded_size: cached_info.gitignore_excluded_size,
+            code_file_count: cached_info.code_file_count,
+            dependency_file_count: cached_info.dependency_file_count,
+            total_file_count: cached_info.total_file_count,
+            gitignore_excluded_file_count: cached_info.gitignore_excluded_file_count,
+            last_modified: cached_info.last_modified,
+        }
+    }
+    
+    /// 获取缓存状态
+    pub fn get_cache_status(&self, project_path: &Path) -> Option<CacheStatus> {
+        self.cache.as_ref().map(|cache| cache.check_cache_status(project_path))
+    }
+    
+    /// 清理过期缓存
+    pub async fn cleanup_cache(&mut self) -> Result<usize> {
+        match &mut self.cache {
+            Some(cache) => cache.cleanup_expired().await,
+            None => Ok(0),
+        }
+    }
+    
+    /// 清除所有缓存
+    pub async fn clear_cache(&mut self) -> Result<()> {
+        match &mut self.cache {
+            Some(cache) => cache.clear_all().await,
+            None => Ok(()),
+        }
+    }
+    
+    /// 获取缓存统计信息
+    pub fn get_cache_stats(&self) -> Option<super::size_cache::CacheStats> {
+        self.cache.as_ref().map(|cache| cache.get_stats())
+    }
 }
 
 #[cfg(test)]
@@ -343,7 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_calculate_empty_directory() {
-        let calculator = SizeCalculator::new();
+        let mut calculator = SizeCalculator::new();
         let temp_dir = tempdir().unwrap();
         
         let size_info = calculator.calculate_project_size(temp_dir.path()).await.unwrap();
@@ -356,7 +546,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_calculate_simple_project() {
-        let calculator = SizeCalculator::new();
+        let mut calculator = SizeCalculator::new();
         let temp_dir = tempdir().unwrap();
         
         // 创建一些测试文件
@@ -379,7 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ignore_dependency_directories() {
-        let calculator = SizeCalculator::new();
+        let mut calculator = SizeCalculator::new();
         let temp_dir = tempdir().unwrap();
         
         // 创建代码文件

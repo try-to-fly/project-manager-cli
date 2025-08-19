@@ -9,6 +9,7 @@ use ratatui::{
 use crate::models::Project;
 use crate::tui::app::TabView;
 use crate::utils::{size_format, time_format};
+use crate::models::DependencyCalculationStatus;
 
 /// 主屏幕组件 - 负责绘制项目列表和详情页面
 pub struct MainScreen {
@@ -196,6 +197,21 @@ impl MainScreen {
                 
                 if project.has_uncommitted_changes() {
                     spans.push(Span::styled(" [未提交]", Style::default().fg(Color::Yellow)));
+                }
+                
+                // 添加依赖计算状态
+                let dependency_status = project.dependency_status_display();
+                if !dependency_status.is_empty() {
+                    let status_color = match project.dependency_calculation_status {
+                        DependencyCalculationStatus::Calculating => Color::Cyan,
+                        DependencyCalculationStatus::NotCalculated => Color::Gray,
+                        DependencyCalculationStatus::Failed(_) => Color::Red,
+                        _ => Color::Gray,
+                    };
+                    spans.push(Span::styled(
+                        format!(" [{}]", dependency_status), 
+                        Style::default().fg(status_color)
+                    ));
                 }
                 
                 ListItem::new(Line::from(spans))
@@ -460,10 +476,20 @@ impl MainScreen {
             Span::styled(size_format::format_size(project.size()), Style::default().fg(Color::Green)),
         ]));
         
-        info_text.push(Line::from(vec![
-            Span::styled("依赖大小: ", Style::default().fg(Color::White)),
-            Span::styled(size_format::format_size(project.dependency_size()), Style::default().fg(Color::Yellow)),
-        ]));
+        // 依赖大小显示（根据计算状态）
+        let dependency_status = project.dependency_status_display();
+        if dependency_status.is_empty() {
+            info_text.push(Line::from(vec![
+                Span::styled("依赖大小: ", Style::default().fg(Color::White)),
+                Span::styled(size_format::format_size(project.dependency_size()), Style::default().fg(Color::Yellow)),
+            ]));
+        } else {
+            info_text.push(Line::from(vec![
+                Span::styled("依赖大小: ", Style::default().fg(Color::White)),
+                Span::styled(size_format::format_size(project.dependency_size()), Style::default().fg(Color::Yellow)),
+                Span::styled(format!(" ({})", dependency_status), Style::default().fg(Color::Gray)),
+            ]));
+        }
         
         let modified_time = std::time::SystemTime::UNIX_EPOCH + 
             std::time::Duration::from_secs(project.last_modified.timestamp() as u64);
@@ -542,6 +568,27 @@ impl MainScreen {
             Span::styled("代码文件数: ", Style::default().fg(Color::White)),
             Span::styled(project.file_count().to_string(), Style::default().fg(Color::Green)),
         ]));
+        
+        if project.total_files() > project.file_count() {
+            info_text.push(Line::from(vec![
+                Span::styled("总文件数: ", Style::default().fg(Color::White)),
+                Span::styled(project.total_files().to_string(), Style::default().fg(Color::Cyan)),
+            ]));
+        }
+        
+        if project.dependency_files() > 0 {
+            info_text.push(Line::from(vec![
+                Span::styled("依赖文件数: ", Style::default().fg(Color::White)),
+                Span::styled(project.dependency_files().to_string(), Style::default().fg(Color::Yellow)),
+            ]));
+        }
+        
+        if project.gitignore_excluded_file_count > 0 {
+            info_text.push(Line::from(vec![
+                Span::styled("已忽略文件数: ", Style::default().fg(Color::White)),
+                Span::styled(project.gitignore_excluded_file_count.to_string(), Style::default().fg(Color::Red)),
+            ]));
+        }
         
         if project.dependency_size() > 0 {
             info_text.push(Line::from(vec![

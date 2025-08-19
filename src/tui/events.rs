@@ -3,7 +3,7 @@ use crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers};
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::models::Project;
+use crate::models::{Project, GitInfo};
 
 /// 应用程序事件枚举
 #[derive(Clone, Debug)]
@@ -23,11 +23,35 @@ pub enum Event {
     /// 发现新项目
     ProjectFound(Project),
     
-    /// 项目大小更新事件
+    /// 项目大小更新事件（已弃用，使用ProjectDetailsUpdated替代）
     ProjectSizeUpdated {
         project_index: usize,
         code_size: u64,
         total_size: u64,
+        gitignore_excluded_size: u64,
+        code_file_count: usize,
+        dependency_file_count: usize,
+        total_file_count: usize,
+        gitignore_excluded_file_count: usize,
+    },
+    
+    /// 项目详情更新事件
+    ProjectDetailsUpdated {
+        project_name: String,
+        code_size: u64,
+        dependency_size: u64,
+        total_size: u64,
+        gitignore_excluded_size: u64,
+        code_file_count: usize,
+        dependency_file_count: usize,
+        total_file_count: usize,
+        gitignore_excluded_file_count: usize,
+        git_info: Option<GitInfo>,
+    },
+    
+    /// 项目开始计算事件
+    ProjectCalculationStarted {
+        project_name: String,
     },
     
     /// 应用程序退出

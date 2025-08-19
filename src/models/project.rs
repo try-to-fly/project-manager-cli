@@ -2,6 +2,19 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// 依赖计算状态
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum DependencyCalculationStatus {
+    /// 未开始计算
+    NotCalculated,
+    /// 正在计算中
+    Calculating,
+    /// 计算完成
+    Completed,
+    /// 计算失败
+    Failed(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     /// 项目名称
@@ -19,6 +32,21 @@ pub struct Project {
     /// 总大小（包含依赖）
     pub total_size: u64,
     
+    /// 被 gitignore 排除的文件大小（不含依赖目录，避免重复计算）
+    pub gitignore_excluded_size: u64,
+    
+    /// 代码文件数量（不包含依赖）
+    pub code_file_count: usize,
+    
+    /// 依赖文件数量
+    pub dependency_file_count: usize,
+    
+    /// 总文件数量
+    pub total_file_count: usize,
+    
+    /// 被 gitignore 排除的文件数量
+    pub gitignore_excluded_file_count: usize,
+    
     /// 最后修改时间
     pub last_modified: DateTime<Utc>,
     
@@ -33,6 +61,12 @@ pub struct Project {
     
     /// 项目描述（从 package.json、Cargo.toml 等获取）
     pub description: Option<String>,
+    
+    /// 依赖计算状态
+    pub dependency_calculation_status: DependencyCalculationStatus,
+    
+    /// 缓存的依赖总大小（从异步计算中获得）
+    pub cached_dependency_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -131,7 +165,10 @@ pub enum DependencyType {
 impl Project {
     /// 获取依赖总大小
     pub fn dependency_size(&self) -> u64 {
-        self.dependencies.iter().map(|d| d.size).sum()
+        // 优先使用缓存的依赖大小（从异步计算得到的准确值）
+        // 如果没有缓存值，则使用 dependencies 向量计算
+        self.cached_dependency_size
+            .unwrap_or_else(|| self.dependencies.iter().map(|d| d.size).sum())
     }
     
     /// 获取项目代码大小（不包含依赖）
@@ -139,10 +176,19 @@ impl Project {
         self.code_size
     }
     
-    /// 获取文件数量（估算）
+    /// 获取代码文件数量（准确值）
     pub fn file_count(&self) -> usize {
-        // 基于项目大小估算文件数量，平均每个文件 5KB
-        (self.code_size / 5120).max(1) as usize
+        self.code_file_count
+    }
+    
+    /// 获取总文件数量（包含依赖）
+    pub fn total_files(&self) -> usize {
+        self.total_file_count
+    }
+    
+    /// 获取依赖文件数量
+    pub fn dependency_files(&self) -> usize {
+        self.dependency_file_count
     }
     
     /// 检查是否有未提交的更改
@@ -186,6 +232,16 @@ impl Project {
                 format!("Mixed ({})", type_names.join(", "))
             }
             ProjectType::Unknown => "Unknown".to_string(),
+        }
+    }
+    
+    /// 获取依赖计算状态的显示文本
+    pub fn dependency_status_display(&self) -> &str {
+        match &self.dependency_calculation_status {
+            DependencyCalculationStatus::NotCalculated => "等待计算",
+            DependencyCalculationStatus::Calculating => "计算中...",
+            DependencyCalculationStatus::Completed => "",
+            DependencyCalculationStatus::Failed(_) => "计算失败",
         }
     }
     

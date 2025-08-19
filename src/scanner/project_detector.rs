@@ -166,7 +166,7 @@ impl ProjectDetector {
         
         // 检测 node_modules
         if node_modules.exists() {
-            if let Ok(size) = self.calculate_directory_size(&node_modules).await {
+            if let Ok(size) = self.calculate_dependency_directory_size(&node_modules).await {
                 let package_count = self.count_packages(&node_modules).await.unwrap_or(0);
                 dependencies.push(DependencyInfo {
                     dependency_type: DependencyType::NodeModules,
@@ -204,7 +204,7 @@ impl ProjectDetector {
         
         // 检测 target 目录
         if target_dir.exists() {
-            if let Ok(size) = self.calculate_directory_size(&target_dir).await {
+            if let Ok(size) = self.calculate_dependency_directory_size(&target_dir).await {
                 dependencies.push(DependencyInfo {
                     dependency_type: DependencyType::RustTarget,
                     path: target_dir,
@@ -251,7 +251,7 @@ impl ProjectDetector {
         for venv_name in &["venv", "env", ".venv", ".env"] {
             let venv_path = path.join(venv_name);
             if venv_path.exists() {
-                if let Ok(size) = self.calculate_directory_size(&venv_path).await {
+                if let Ok(size) = self.calculate_dependency_directory_size(&venv_path).await {
                     dependencies.push(DependencyInfo {
                         dependency_type: DependencyType::PythonVenv,
                         path: venv_path,
@@ -264,7 +264,7 @@ impl ProjectDetector {
         
         // 检测 __pycache__
         if pycache.exists() {
-            if let Ok(size) = self.calculate_directory_size(&pycache).await {
+            if let Ok(size) = self.calculate_dependency_directory_size(&pycache).await {
                 dependencies.push(DependencyInfo {
                     dependency_type: DependencyType::PythonCache,
                     path: pycache,
@@ -307,7 +307,7 @@ impl ProjectDetector {
         // 检测 Maven target 目录
         let target_dir = path.join("target");
         if target_dir.exists() {
-            if let Ok(size) = self.calculate_directory_size(&target_dir).await {
+            if let Ok(size) = self.calculate_dependency_directory_size(&target_dir).await {
                 dependencies.push(DependencyInfo {
                     dependency_type: DependencyType::Other("target".to_string()),
                     path: target_dir,
@@ -320,7 +320,7 @@ impl ProjectDetector {
         // 检测 Gradle build 目录
         let build_dir = path.join("build");
         if build_dir.exists() {
-            if let Ok(size) = self.calculate_directory_size(&build_dir).await {
+            if let Ok(size) = self.calculate_dependency_directory_size(&build_dir).await {
                 dependencies.push(DependencyInfo {
                     dependency_type: DependencyType::Other("build".to_string()),
                     path: build_dir,
@@ -349,7 +349,7 @@ impl ProjectDetector {
         // 检测 build 目录
         let build_dir = path.join("build");
         if build_dir.exists() {
-            if let Ok(size) = self.calculate_directory_size(&build_dir).await {
+            if let Ok(size) = self.calculate_dependency_directory_size(&build_dir).await {
                 dependencies.push(DependencyInfo {
                     dependency_type: DependencyType::Other("build".to_string()),
                     path: build_dir,
@@ -362,6 +362,26 @@ impl ProjectDetector {
         Ok(Some((None, dependencies)))
     }
     
+    /// 计算依赖目录的大小（不跳过任何子目录）
+    fn calculate_dependency_directory_size<'a>(&'a self, path: &'a Path) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut total_size = 0;
+            let mut entries = tokio::fs::read_dir(path).await?;
+            
+            while let Some(entry) = entries.next_entry().await? {
+                let metadata = entry.metadata().await?;
+                if metadata.is_file() {
+                    total_size += metadata.len();
+                } else if metadata.is_dir() {
+                    // 递归计算所有子目录大小
+                    total_size += self.calculate_dependency_directory_size(&entry.path()).await.unwrap_or(0);
+                }
+            }
+            
+            Ok(total_size)
+        })
+    }
+
     /// 计算目录大小（跳过大型依赖目录）
     fn calculate_directory_size<'a>(&'a self, path: &'a Path) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64>> + Send + 'a>> {
         Box::pin(async move {
@@ -390,8 +410,7 @@ impl ProjectDetector {
                         "coverage" | ".nyc_output" |
                         ".next" | ".nuxt" | ".parcel-cache"
                     ) {
-                        // 对于这些目录，只估算一个大概的大小，不递归计算
-                        // 或者可以选择完全跳过
+                        // 对于这些目录，跳过以避免递归计算导致性能问题
                         continue;
                     }
                     
