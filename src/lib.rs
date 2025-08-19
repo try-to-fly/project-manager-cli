@@ -6,4 +6,4 @@ pub mod tui;
 pub mod operations;
 
 // 重新导出常用模块
-pub use scanner::{SizeCalculator, GitIgnoreAnalyzer, SizeCache, CacheConfig};
+pub use scanner::SizeCalculator;

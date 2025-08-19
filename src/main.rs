@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
     
     // 根据命令执行相应操作
     match cli.command {
-        Commands::Scan { paths, depth, format, output } => {
+        Commands::Scan { paths, depth, format: _, output: _ } => {
             println!("扫描功能待实现");
             println!("扫描路径: {:?}", paths);
             if let Some(d) = depth {
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
             let mut app = App::new(config, scan_paths);
             app.run().await?;
         }
-        Commands::Clean { project_path, clean_type, force } => {
+        Commands::Clean { project_path, clean_type: _, force } => {
             println!("清理功能待实现");
             println!("项目路径: {}", project_path);
             println!("强制执行: {}", force);

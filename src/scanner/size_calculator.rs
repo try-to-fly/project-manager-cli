@@ -1,10 +1,12 @@
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 use anyhow::Result;
 use tokio::fs;
 use std::fs::Metadata;
 
-use super::git_ignore_analyzer::{GitIgnoreAnalyzer, IgnoreStats};
+use super::git_ignore_analyzer::GitIgnoreAnalyzer;
 use super::size_cache::{SizeCache, CachedSizeInfo, CacheConfig, CacheStatus};
 use super::parallel_file_walker::{ParallelFileWalker, SizeCalculationResult, ScanProgress as ParallelScanProgress, ScanStage};
 use std::sync::Arc;

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use crate::models::{ProjectType, DependencyInfo, DependencyType};
 use anyhow::Result;

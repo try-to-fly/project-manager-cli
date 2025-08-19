@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::path::Path;
 use git2::{Repository, RepositoryState, Status};
 use chrono::{DateTime, Utc};

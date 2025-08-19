@@ -270,6 +270,7 @@ impl Config {
     }
     
     /// 将配置转换为 SizeCache 可以使用的 CacheConfig
+    #[allow(dead_code)]
     pub fn to_size_cache_config(&self) -> crate::scanner::size_cache::CacheConfig {
         crate::scanner::size_cache::CacheConfig {
             enabled: self.cache.enabled,

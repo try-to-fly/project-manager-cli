@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::time::{SystemTime, Duration};
@@ -283,7 +285,7 @@ impl SizeCache {
     
     /// 获取缓存统计信息
     pub fn get_stats(&self) -> CacheStats {
-        let now = SystemTime::now();
+        let _now = SystemTime::now();
         let mut expired_count = 0;
         let mut git_repos = 0;
         let mut total_cached_size = 0u64;

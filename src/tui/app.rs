@@ -17,6 +17,7 @@ use anyhow::Result;
 
 use crate::config::Config;
 use crate::models::{Project, DependencyCalculationStatus};
+use crate::scanner::FileWalker;
 
 /// 统一的进度信息结构
 #[derive(Clone, Debug)]
@@ -30,6 +31,7 @@ pub struct ProgressInfo {
     /// 当前处理的项目/文件名
     pub current_item: String,
     /// 额外的状态信息
+    #[allow(dead_code)]
     pub extra_info: String,
 }
 
@@ -90,7 +92,6 @@ impl ProgressInfo {
         }
     }
 }
-use crate::scanner::FileWalker;
 use crate::tui::events::{Event, EventHandler, keys};
 use crate::tui::screens::MainScreen;
 use tokio::sync::mpsc;
@@ -122,6 +123,7 @@ pub enum AppState {
     ExternalEditor,
     
     /// 错误状态
+    #[allow(dead_code)]
     Error(String),
     
     /// 退出中
@@ -131,6 +133,7 @@ pub enum AppState {
 /// 主应用程序
 pub struct App {
     /// 应用配置
+    #[allow(dead_code)]
     config: Config,
     
     /// 当前状态
@@ -149,6 +152,7 @@ pub struct App {
     status_message: String,
     
     /// 是否显示详细信息
+    #[allow(dead_code)]
     show_details: bool,
     
     /// 当前视图标签
@@ -170,6 +174,7 @@ pub struct App {
     calculation_tasks: HashMap<String, JoinHandle<()>>,
     
     /// 最大并发任务数限制
+    #[allow(dead_code)]
     max_concurrent_tasks: usize,
 }
 
@@ -275,7 +280,7 @@ impl App {
                     self.handle_mouse_event(mouse).await?;
                     needs_redraw = true;
                 }
-                Event::Resize(w, h) => {
+                Event::Resize(_w, _h) => {
                     // 终端大小调整需要重绘
                     needs_redraw = true;
                 }
@@ -1080,13 +1085,13 @@ impl App {
     }
     
     /// 异步扫描项目
+    #[allow(dead_code)]
     async fn scan_projects_async(
         paths: Vec<String>, 
         config: Config, 
         progress_sender: mpsc::UnboundedSender<Event>
     ) -> Result<Vec<Project>> {
-        use crate::scanner::FileWalker;
-        
+                
         tracing::info!("开始异步扫描项目，路径: {:?}", paths);
         
         let mut all_projects = Vec::new();
@@ -1237,7 +1242,6 @@ impl App {
         // 创建进度回调
         let progress_callback = {
             let sender = progress_sender.clone();
-            let project_name = project_name.clone();
             std::sync::Arc::new(move |name: String, processed: usize, total: Option<usize>, path: String, bytes: u64, stage| {
                 let _ = sender.send(Event::SizeCalculationProgress {
                     project_name: name,
@@ -1390,7 +1394,6 @@ impl App {
     /// 清理项目依赖
     async fn clean_project_dependencies(project_path: &std::path::Path) -> Result<u64> {
         use std::fs;
-        use crate::utils::size_format;
         
         let mut total_cleaned = 0u64;
         
@@ -1540,11 +1543,13 @@ impl App {
     }
     
     /// 检查是否可以启动新任务
+    #[allow(dead_code)]
     fn can_start_new_task(&self) -> bool {
         self.calculation_tasks.len() < self.max_concurrent_tasks
     }
     
     /// 等待任务槽位可用
+    #[allow(dead_code)]
     async fn wait_for_task_slot(&mut self) {
         while !self.can_start_new_task() {
             self.cleanup_finished_tasks();
@@ -1556,6 +1561,7 @@ impl App {
     }
     
     /// 启动项目计算任务（带并发控制）
+    #[allow(dead_code)]
     async fn start_project_calculation_task(
         &mut self, 
         project_path: std::path::PathBuf,

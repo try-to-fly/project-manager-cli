@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc, Local};
+use chrono::{DateTime, Local};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 格式化时间为友好显示格式
@@ -17,6 +17,7 @@ pub fn format_time(time: SystemTime) -> String {
 }
 
 /// 格式化相对时间 (例如: "2 天前")
+#[allow(dead_code)]
 pub fn format_relative_time(time: SystemTime) -> String {
     let now = SystemTime::now();
     

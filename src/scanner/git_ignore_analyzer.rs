@@ -1,8 +1,10 @@
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 use anyhow::Result;
 use git2::Repository;
-use ignore::{WalkBuilder, DirEntry};
+use ignore::WalkBuilder;
 
 /// Git 忽略规则分析器 - 负责解析和应用 .gitignore 规则
 pub struct GitIgnoreAnalyzer {

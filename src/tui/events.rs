@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::time::Duration;
 use crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use anyhow::Result;

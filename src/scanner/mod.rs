@@ -6,10 +6,8 @@ pub mod project_detector;
 pub mod size_cache;
 pub mod size_calculator;
 
-pub use file_walker::{FileWalker, ScanProgress};
-pub use git_analyzer::{GitAnalyzer, RepositoryStats};
-pub use git_ignore_analyzer::{GitIgnoreAnalyzer, IgnoreStats};
+pub use file_walker::FileWalker;
+pub use git_analyzer::GitAnalyzer;
 pub use project_detector::{ProjectDetector, DetectedProject};
-pub use size_cache::{SizeCache, CachedSizeInfo, CacheConfig, CacheStats, CacheStatus};
-pub use size_calculator::{SizeCalculator, ProjectSizeInfo, DirectorySizeInfo};
-pub use parallel_file_walker::{ParallelFileWalker, FileInfo, SizeCalculationResult, ScanProgress as ParallelScanProgress, ScanStage};
+pub use size_calculator::SizeCalculator;
+pub use parallel_file_walker::ScanStage;
