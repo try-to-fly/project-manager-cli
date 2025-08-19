@@ -4,6 +4,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::models::{Project, GitInfo};
+use crate::scanner::{ScanStage};
 
 /// 应用程序事件枚举
 #[derive(Clone, Debug)]
@@ -55,6 +56,16 @@ pub enum Event {
     /// 项目开始计算事件
     ProjectCalculationStarted {
         project_name: String,
+    },
+    
+    /// 大小计算进度更新
+    SizeCalculationProgress {
+        project_name: String,
+        processed_files: usize,
+        total_files: Option<usize>,
+        current_path: String,
+        bytes_processed: u64,
+        stage: ScanStage,
     },
     
     /// 应用程序退出
@@ -161,11 +172,8 @@ impl EventHandler {
         if let Some(pause_sender) = self.pause_sender.take() {
             let _ = pause_sender.send(()); // 发送暂停信号
         }
-        // 等待任务结束
-        if let Some(handle) = self.handler.take() {
-            // 不使用abort()，让任务自然结束
-            handle.abort(); // 备用方案，确保任务结束
-        }
+        // 不立即abort，让任务通过oneshot信号优雅退出
+        // handle将在任务自然完成后自动清理
     }
     
     /// 恢复事件处理（从外部编辑器返回后）
@@ -176,10 +184,17 @@ impl EventHandler {
     
     /// 停止事件处理
     pub fn stop(&mut self) {
-        if let Some(handle) = self.handler.take() {
-            handle.abort();
+        // 首先尝试通过信号优雅退出
+        if let Some(pause_sender) = self.pause_sender.take() {
+            let _ = pause_sender.send(());
         }
-        self.pause_sender = None;
+        
+        // 如果有运行中的任务且无法通过信号停止，才使用abort
+        if let Some(handle) = self.handler.take() {
+            if !handle.is_finished() {
+                handle.abort();
+            }
+        }
     }
 }
 

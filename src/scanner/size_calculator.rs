@@ -6,6 +6,11 @@ use std::fs::Metadata;
 
 use super::git_ignore_analyzer::{GitIgnoreAnalyzer, IgnoreStats};
 use super::size_cache::{SizeCache, CachedSizeInfo, CacheConfig, CacheStatus};
+use super::parallel_file_walker::{ParallelFileWalker, SizeCalculationResult, ScanProgress as ParallelScanProgress, ScanStage};
+use std::sync::Arc;
+
+/// 进度回调函数类型
+pub type ProgressCallback = dyn Fn(String, usize, Option<usize>, String, u64, ScanStage) + Send + Sync;
 
 /// 大小计算器 - 负责计算项目的代码大小和依赖大小
 pub struct SizeCalculator {
@@ -122,7 +127,96 @@ impl SizeCalculator {
         })
     }
     
-    /// 计算项目的完整大小信息
+    /// 高性能并发计算项目大小（推荐方法）
+    pub async fn calculate_project_size_parallel(
+        &mut self, 
+        project_path: &Path,
+        progress_callback: Option<Arc<ProgressCallback>>,
+        project_name: String,
+    ) -> Result<ProjectSizeInfo> {
+        // 先尝试从缓存获取
+        if let Some(ref cache) = self.cache {
+            if let Some(cached_info) = cache.get(project_path).await {
+                return Ok(self.convert_cached_to_project_size_info(cached_info));
+            }
+        }
+        
+        // 创建并发文件扫描器
+        let walker = ParallelFileWalker::with_config(
+            self.ignore_dirs.clone(),
+            self.ignore_extensions.clone(),
+            8, // 使用8个并发任务
+        );
+        
+        // 设置进度回调
+        let walker_progress_callback = {
+            let callback = progress_callback.clone();
+            let project_name = project_name.clone();
+            move |progress: ParallelScanProgress| {
+                if let Some(ref callback) = callback {
+                    callback(
+                        project_name.clone(),
+                        progress.processed_files,
+                        progress.total_estimated,
+                        progress.current_path.to_string_lossy().to_string(),
+                        progress.bytes_processed,
+                        progress.stage,
+                    );
+                }
+            }
+        };
+        
+        // 执行并发扫描
+        let file_infos = walker.scan_parallel(project_path, walker_progress_callback).await?;
+        
+        // 计算统计结果
+        let calc_result = SizeCalculationResult::from_file_infos(&file_infos);
+        
+        // 转换为 ProjectSizeInfo
+        let mut size_info = ProjectSizeInfo {
+            code_size: calc_result.code_size,
+            dependency_size: calc_result.dependency_size,
+            total_size: calc_result.total_size,
+            gitignore_excluded_size: 0, // 将在下面计算
+            code_file_count: calc_result.code_file_count,
+            dependency_file_count: calc_result.dependency_file_count,
+            total_file_count: calc_result.total_file_count,
+            gitignore_excluded_file_count: 0, // 将在下面计算
+            last_modified: std::time::SystemTime::now().into(),
+        };
+        
+        // 如果是 git 仓库，计算被忽略的文件
+        if let Ok(git_analyzer) = GitIgnoreAnalyzer::new(project_path) {
+            if git_analyzer.is_git_repository() {
+                let exclude_deps = ["node_modules", "target", "build", "dist", "out", "bin", "obj", 
+                                   "__pycache__", "venv", "env", ".venv", ".env", "site-packages",
+                                   ".git", ".svn", ".hg", ".vscode", ".idea", ".vs", "vendor", "bower_components"];
+                
+                if let Ok((gitignore_size, gitignore_count)) = git_analyzer
+                    .calculate_ignored_files_size_exclude_dependencies(&exclude_deps).await 
+                {
+                    size_info.gitignore_excluded_size = gitignore_size;
+                    size_info.gitignore_excluded_file_count = gitignore_count;
+                }
+            }
+        }
+        
+        // 保存到缓存
+        if self.cache.is_some() {
+            let cached_info = self.convert_project_size_info_to_cached(&size_info);
+            let is_git_repo = GitIgnoreAnalyzer::new(project_path)
+                .map(|ga| ga.is_git_repository())
+                .unwrap_or(false);
+            
+            if let Some(ref mut cache) = self.cache {
+                let _ = cache.put(project_path, cached_info, is_git_repo).await;
+            }
+        }
+        
+        Ok(size_info)
+    }
+    
+    /// 计算项目的完整大小信息（兼容性保留）
     pub async fn calculate_project_size(&mut self, project_path: &Path) -> Result<ProjectSizeInfo> {
         // 先尝试从缓存获取
         if let Some(ref cache) = self.cache {

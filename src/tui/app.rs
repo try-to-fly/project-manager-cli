@@ -17,10 +17,85 @@ use anyhow::Result;
 
 use crate::config::Config;
 use crate::models::{Project, DependencyCalculationStatus};
+
+/// 统一的进度信息结构
+#[derive(Clone, Debug)]
+pub struct ProgressInfo {
+    /// 进度类型
+    pub progress_type: ProgressType,
+    /// 当前进度
+    pub current: usize,
+    /// 总数（如果已知）
+    pub total: Option<usize>,
+    /// 当前处理的项目/文件名
+    pub current_item: String,
+    /// 额外的状态信息
+    pub extra_info: String,
+}
+
+/// 进度类型枚举
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProgressType {
+    /// 空闲状态
+    Idle,
+    /// 扫描项目
+    Scanning,
+    /// 发现文件
+    Discovering,
+    /// 计算大小
+    Calculating,
+}
+
+impl Default for ProgressInfo {
+    fn default() -> Self {
+        Self {
+            progress_type: ProgressType::Idle,
+            current: 0,
+            total: None,
+            current_item: String::new(),
+            extra_info: String::new(),
+        }
+    }
+}
+
+impl ProgressInfo {
+    /// 格式化为显示字符串
+    pub fn format_display(&self) -> String {
+        match self.progress_type {
+            ProgressType::Idle => String::new(),
+            ProgressType::Scanning => {
+                format!("扫描中: {} 个项目", self.current)
+            }
+            ProgressType::Discovering => {
+                if let Some(total) = self.total {
+                    format!("发现文件: {}/{}", self.current, total)
+                } else {
+                    format!("发现文件: {}", self.current)
+                }
+            }
+            ProgressType::Calculating => {
+                let item_display = if self.current_item.len() > 15 {
+                    format!("{}...", &self.current_item[..12])
+                } else {
+                    self.current_item.clone()
+                };
+                
+                if let Some(total) = self.total {
+                    let percentage = if total > 0 { (self.current * 100) / total } else { 0 };
+                    format!("计算 {}: {}/{} ({}%)", item_display, self.current, total, percentage)
+                } else {
+                    format!("计算 {}: {} 文件", item_display, self.current)
+                }
+            }
+        }
+    }
+}
 use crate::scanner::FileWalker;
 use crate::tui::events::{Event, EventHandler, keys};
 use crate::tui::screens::MainScreen;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use std::collections::HashMap;
 
 /// 应用程序状态
 #[derive(Debug, Clone, PartialEq)]
@@ -82,11 +157,20 @@ pub struct App {
     /// 扫描进度信息
     scan_progress: String,
     
+    /// 统一的进度信息状态
+    progress_info: ProgressInfo,
+    
     /// 事件处理器
     event_handler: EventHandler,
     
     /// 主屏幕
     main_screen: MainScreen,
+    
+    /// 项目计算任务管理
+    calculation_tasks: HashMap<String, JoinHandle<()>>,
+    
+    /// 最大并发任务数限制
+    max_concurrent_tasks: usize,
 }
 
 /// 视图标签
@@ -115,8 +199,11 @@ impl App {
             show_details: false,
             current_tab: TabView::Projects,
             scan_progress: String::new(),
+            progress_info: ProgressInfo::default(),
             event_handler: EventHandler::new(),
             main_screen: MainScreen::new(),
+            calculation_tasks: HashMap::new(),
+            max_concurrent_tasks: 10, // 限制最多10个并发计算任务
         }
     }
     
@@ -138,6 +225,9 @@ impl App {
         // 主事件循环
         let result = self.main_loop(&mut terminal).await;
         
+        // 清理所有运行中的任务
+        self.cleanup_all_tasks().await;
+        
         // 恢复终端
         disable_raw_mode()?;
         execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
@@ -148,9 +238,20 @@ impl App {
     
     /// 主事件循环
     async fn main_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+        let mut needs_redraw = true; // 首次绘制
+        let mut last_redraw = std::time::Instant::now();
+        let min_redraw_interval = std::time::Duration::from_millis(16); // 约60fps
+        
         loop {
-            // 绘制界面
-            terminal.draw(|f| self.draw(f))?;
+            // 只在需要时重绘，且限制重绘频率
+            if needs_redraw && last_redraw.elapsed() >= min_redraw_interval {
+                terminal.draw(|f| self.draw(f))?;
+                needs_redraw = false;
+                last_redraw = std::time::Instant::now();
+                
+                // 定期清理已完成的任务
+                self.cleanup_finished_tasks();
+            }
             
             // 处理事件
             match self.event_handler.next().await? {
@@ -160,27 +261,53 @@ impl App {
                         break;
                     }
                     
-                    let needs_redraw = self.handle_key_event(key).await?;
-                    if needs_redraw {
-                        // 清除屏幕并强制重绘
+                    let force_redraw = self.handle_key_event(key).await?;
+                    needs_redraw = true;
+                    if force_redraw {
+                        // 清除屏幕并强制立即重绘
                         terminal.clear()?;
+                        terminal.draw(|f| self.draw(f))?;
+                        last_redraw = std::time::Instant::now();
+                        needs_redraw = false;
                     }
                 }
                 Event::Mouse(mouse) => {
                     self.handle_mouse_event(mouse).await?;
+                    needs_redraw = true;
                 }
                 Event::Resize(w, h) => {
-                    // 终端大小调整会自动处理
+                    // 终端大小调整需要重绘
+                    needs_redraw = true;
                 }
                 Event::ScanComplete => {
                     self.state = AppState::ProjectList;
                     self.status_message = format!("扫描完成！发现 {} 个项目", self.projects.len());
+                    // 清理扫描进度状态
+                    self.progress_info = ProgressInfo::default();
+                    self.scan_progress.clear();
+                    needs_redraw = true;
                 }
                 Event::ScanProgress(progress) => {
+                    // 更新扫描进度信息
+                    if progress.contains("扫描完成") {
+                        self.progress_info.progress_type = ProgressType::Idle;
+                    } else {
+                        self.progress_info.progress_type = ProgressType::Scanning;
+                        if let Some(num_start) = progress.find("发现 ") {
+                            if let Some(num_end) = progress[num_start + 3..].find(" 个") {
+                                let num_str = &progress[num_start + 3..num_start + 3 + num_end];
+                                if let Ok(count) = num_str.parse::<usize>() {
+                                    self.progress_info.current = count;
+                                }
+                            }
+                        }
+                    }
                     self.scan_progress = progress;
+                    needs_redraw = true;
                 }
                 Event::ProjectFound(project) => {
                     self.projects.push(project);
+                    needs_redraw = true;
                 }
                 Event::ProjectSizeUpdated { 
                     project_index, 
@@ -202,6 +329,7 @@ impl App {
                         project.total_file_count = total_file_count;
                         project.gitignore_excluded_file_count = gitignore_excluded_file_count;
                     }
+                    needs_redraw = true;
                 }
                 Event::ProjectDetailsUpdated {
                     project_name,
@@ -228,21 +356,62 @@ impl App {
                         project.cached_dependency_size = Some(dependency_size); // 更新缓存的依赖大小
                         project.dependency_calculation_status = DependencyCalculationStatus::Completed;
                     }
+                    needs_redraw = true;
                 }
                 Event::ProjectCalculationStarted { project_name } => {
                     // 找到对应的项目并标记为计算中状态
                     if let Some(project) = self.projects.iter_mut().find(|p| p.name == project_name) {
                         project.dependency_calculation_status = DependencyCalculationStatus::Calculating;
                     }
+                    needs_redraw = true;
                 }
                 Event::Refresh => {
                     self.start_scan().await?;
+                    needs_redraw = true;
                 }
                 Event::Quit => {
                     break;
                 }
+                Event::SizeCalculationProgress { 
+                    project_name,
+                    processed_files,
+                    total_files,
+                    current_path: _,
+                    bytes_processed: _,
+                    stage,
+                } => {
+                    // 更新统一进度信息
+                    self.progress_info.progress_type = match stage {
+                        crate::scanner::ScanStage::Discovery => ProgressType::Discovering,
+                        crate::scanner::ScanStage::Metadata | crate::scanner::ScanStage::Calculation => ProgressType::Calculating,
+                        crate::scanner::ScanStage::Completed => ProgressType::Idle,
+                    };
+                    self.progress_info.current = processed_files;
+                    self.progress_info.total = total_files;
+                    self.progress_info.current_item = project_name.clone();
+                    
+                    // 保持旧的扫描进度信息作为后备（兼容性）
+                    if stage == crate::scanner::ScanStage::Completed {
+                        self.scan_progress.clear();
+                    } else {
+                        self.scan_progress = format!(
+                            "计算 {} 进度: {}/{} 文件 - {}",
+                            project_name,
+                            processed_files,
+                            total_files.map(|t| t.to_string()).unwrap_or("?".to_string()),
+                            match stage {
+                                crate::scanner::ScanStage::Discovery => "发现文件",
+                                crate::scanner::ScanStage::Metadata => "计算大小",
+                                crate::scanner::ScanStage::Calculation => "分析结果",
+                                crate::scanner::ScanStage::Completed => "完成",
+                            }
+                        );
+                    }
+                    needs_redraw = true;
+                }
                 Event::Tick => {
-                    // 定时更新
+                    // 定时更新，不需要每次都重绘
+                    // 只有在有变化时才需要重绘
                 }
             }
             
@@ -422,43 +591,51 @@ impl App {
     
     /// 绘制界面
     fn draw(&mut self, f: &mut Frame) {
-        let size = f.area();
+        let full_area = f.area();
+        
+        // 为底部单行状态栏留出空间
+        let main_area = Rect {
+            x: full_area.x,
+            y: full_area.y,
+            width: full_area.width,
+            height: full_area.height.saturating_sub(1), // 减去一行状态栏的高度
+        };
         
         match self.state {
             AppState::Starting => {
-                self.draw_loading_screen(f, size);
+                self.draw_loading_screen(f, main_area);
             }
             AppState::Scanning => {
-                self.draw_scanning_screen(f, size);
+                self.draw_scanning_screen(f, main_area);
             }
             AppState::ProjectList => {
-                self.main_screen.draw_project_list(f, size, &self.projects, self.selected_project, &self.current_tab);
+                self.main_screen.draw_project_list(f, main_area, &self.projects, self.selected_project, &self.current_tab);
             }
             AppState::ProjectDetail => {
                 if let Some(project) = self.projects.get(self.selected_project) {
-                    self.main_screen.draw_project_detail(f, size, project);
+                    self.main_screen.draw_project_detail(f, main_area, project);
                 }
             }
             AppState::Help => {
-                self.draw_help_screen(f, size);
+                self.draw_help_screen(f, main_area);
             }
             AppState::ConfirmDialog => {
-                self.main_screen.draw_project_list(f, size, &self.projects, self.selected_project, &self.current_tab);
-                self.draw_confirm_dialog(f, size);
+                self.main_screen.draw_project_list(f, main_area, &self.projects, self.selected_project, &self.current_tab);
+                self.draw_confirm_dialog(f, main_area);
             }
             AppState::ExternalEditor => {
                 // 在外部编辑器状态下，显示空屏幕或者保持最后的界面
                 // 由于实际上此时终端被nvim接管，这个状态可能不会被渲染
-                self.draw_loading_screen(f, size);
+                self.draw_loading_screen(f, main_area);
             }
             AppState::Error(ref error) => {
-                self.draw_error_screen(f, size, error);
+                self.draw_error_screen(f, main_area, error);
             }
             _ => {}
         }
         
-        // 绘制状态栏
-        self.draw_status_bar(f, size);
+        // 绘制状态栏（使用完整区域）
+        self.draw_status_bar(f, full_area);
     }
     
     /// 绘制加载屏幕
@@ -576,29 +753,86 @@ impl App {
         f.render_widget(paragraph, area);
     }
     
-    /// 绘制状态栏
+    /// 绘制优化的单行状态栏（左侧状态，右侧进度）
     fn draw_status_bar(&self, f: &mut Frame, area: Rect) {
         let status_area = Rect {
             x: area.x,
-            y: area.y + area.height - 1,
+            y: area.y + area.height - 1, // 单行状态栏
             width: area.width,
             height: 1,
         };
         
-        let status_text = match self.state {
+        // 构建左侧状态信息
+        let left_status_text = match self.state {
             AppState::ProjectList => {
-                format!("{} | 项目: {} | 选中: {}/{}", 
+                let calculating_count = self.calculation_tasks.len();
+                format!("{} | 项目: {} | 选中: {}/{}{}", 
                     self.status_message,
                     self.projects.len(),
                     if self.projects.is_empty() { 0 } else { self.selected_project + 1 },
-                    self.projects.len()
+                    self.projects.len(),
+                    if calculating_count > 0 { format!(" | 计算中: {}", calculating_count) } else { String::new() }
                 )
             }
             _ => self.status_message.clone(),
         };
         
-        let status = Paragraph::new(status_text)
-            .style(Style::default().bg(Color::Blue).fg(Color::White));
+        // 构建右侧进度信息 - 优先显示统一进度，然后是扫描进度，最后是快捷键提示
+        let right_progress_text = {
+            let progress_display = self.progress_info.format_display();
+            if !progress_display.is_empty() {
+                progress_display
+            } else if !self.scan_progress.is_empty() {
+                self.scan_progress.clone()
+            } else {
+                "快捷键: ↑/↓ 选择 | Enter 详情 | d 删除 | c 清理 | i 忽略 | e 编辑 | r 刷新 | q 退出".to_string()
+            }
+        };
+        
+        // 计算布局：左侧状态信息，右侧进度信息
+        let left_width = left_status_text.len() as u16;
+        let right_width = right_progress_text.len() as u16;
+        let total_width = status_area.width;
+        
+        // 检查是否有进度信息需要高亮显示
+        let has_progress = self.progress_info.progress_type != ProgressType::Idle || !self.scan_progress.is_empty();
+        
+        // 创建组合文本，中间用空格填充
+        let combined_text = if left_width + right_width + 3 <= total_width {
+            // 有足够空间显示两边内容
+            let padding = total_width - left_width - right_width;
+            format!("{}{}{}", left_status_text, " ".repeat(padding as usize), right_progress_text)
+        } else {
+            // 空间不够，优先显示左侧状态，截断右侧
+            if left_width + 3 < total_width {
+                let remaining = total_width - left_width - 3;
+                let truncated_right = if right_width <= remaining {
+                    right_progress_text
+                } else {
+                    format!("{}...", &right_progress_text[..remaining.saturating_sub(3) as usize])
+                };
+                format!("{}   {}", left_status_text, truncated_right)
+            } else {
+                // 连左侧都显示不下，只显示左侧并截断
+                if left_width <= total_width {
+                    left_status_text
+                } else {
+                    format!("{}...", &left_status_text[..total_width.saturating_sub(3) as usize])
+                }
+            }
+        };
+        
+        // 根据是否有进度信息选择不同的颜色方案
+        let status_style = if has_progress {
+            // 有进度时使用更明显的背景色
+            Style::default().bg(Color::DarkGray).fg(Color::White)
+        } else {
+            // 无进度时使用较暗的背景色
+            Style::default().bg(Color::Black).fg(Color::Gray)
+        };
+        
+        // 创建状态栏
+        let status = Paragraph::new(combined_text).style(status_style);
         
         f.render_widget(status, status_area);
     }
@@ -629,6 +863,15 @@ impl App {
         self.state = AppState::Scanning;
         self.status_message = "正在扫描项目...".to_string();
         self.projects.clear();
+        
+        // 初始化扫描进度状态
+        self.progress_info = ProgressInfo {
+            progress_type: ProgressType::Scanning,
+            current: 0,
+            total: None,
+            current_item: String::new(),
+            extra_info: String::new(),
+        };
         
         // 使用最简单的扫描方式：直接遍历目录查找项目标识文件
         let scan_paths = self.scan_paths.clone();
@@ -922,6 +1165,31 @@ impl App {
         project_name: String,
         progress_sender: mpsc::UnboundedSender<Event>
     ) {
+        // 设置超时时间，防止计算任务无限运行
+        let timeout_duration = std::time::Duration::from_secs(300); // 5分钟超时
+        
+        let calculation = async move {
+            Self::calculate_project_details_impl(project_path, project_name, progress_sender).await
+        };
+        
+        match tokio::time::timeout(timeout_duration, calculation).await {
+            Ok(_) => {
+                // 计算正常完成
+                tracing::debug!("项目详细信息计算完成");
+            }
+            Err(_) => {
+                // 计算超时
+                tracing::warn!("项目详细信息计算超时");
+            }
+        }
+    }
+    
+    /// 实际的项目详细信息计算逻辑
+    async fn calculate_project_details_impl(
+        project_path: std::path::PathBuf,
+        project_name: String,
+        progress_sender: mpsc::UnboundedSender<Event>
+    ) {
         use crate::scanner::{GitAnalyzer, SizeCalculator};
         use crate::config::Config;
         
@@ -944,15 +1212,44 @@ impl App {
         ));
         
         // 分析 Git 信息（相对较快）
-        let git_info = git_analyzer.analyze_repository(&project_path).unwrap_or(None);
+        let git_info = match git_analyzer.analyze_repository(&project_path) {
+            Ok(info) => info,
+            Err(e) => {
+                tracing::warn!("分析 {} 的 Git 信息失败: {}", project_name, e);
+                let _ = progress_sender.send(Event::ScanProgress(
+                    format!("分析 {} 的 Git 信息失败，跳过", project_name)
+                ));
+                None
+            }
+        };
         
         // 通知开始计算大小
         let _ = progress_sender.send(Event::ScanProgress(
             format!("计算 {} 的项目大小...", project_name)
         ));
         
-        // 计算项目大小（可能较慢）
-        match size_calculator.calculate_project_size(&project_path).await {
+        // 创建进度回调
+        let progress_callback = {
+            let sender = progress_sender.clone();
+            let project_name = project_name.clone();
+            std::sync::Arc::new(move |name: String, processed: usize, total: Option<usize>, path: String, bytes: u64, stage| {
+                let _ = sender.send(Event::SizeCalculationProgress {
+                    project_name: name,
+                    processed_files: processed,
+                    total_files: total,
+                    current_path: path,
+                    bytes_processed: bytes,
+                    stage,
+                });
+            })
+        };
+        
+        // 使用并发方式计算项目大小
+        match size_calculator.calculate_project_size_parallel(
+            &project_path, 
+            Some(progress_callback), 
+            project_name.clone()
+        ).await {
             Ok(size_info) => {
                 // 发送详细信息更新事件
                 let _ = progress_sender.send(Event::ProjectDetailsUpdated {
@@ -974,10 +1271,25 @@ impl App {
                 ));
             }
             Err(e) => {
-                // 计算失败的情况
+                // 计算失败的情况，记录错误日志并发送失败状态
+                tracing::error!("计算 {} 的项目大小失败: {}", project_name, e);
                 let _ = progress_sender.send(Event::ScanProgress(
-                    format!("计算 {} 的详细信息失败: {}", project_name, e)
+                    format!("计算 {} 的详细信息失败: {}，将使用默认值", project_name, e)
                 ));
+                
+                // 发送带有默认值的更新事件，确保项目状态更新
+                let _ = progress_sender.send(Event::ProjectDetailsUpdated {
+                    project_name: project_name.clone(),
+                    code_size: 0,
+                    dependency_size: 0,
+                    total_size: 0,
+                    gitignore_excluded_size: 0,
+                    code_file_count: 0,
+                    dependency_file_count: 0,
+                    total_file_count: 0,
+                    gitignore_excluded_file_count: 0,
+                    git_info,
+                });
             }
         }
     }
@@ -1212,5 +1524,80 @@ impl App {
         
         // 返回true表示需要重绘界面
         Ok(true)
+    }
+    
+    /// 清理已完成的任务
+    fn cleanup_finished_tasks(&mut self) {
+        self.calculation_tasks.retain(|_project_name, handle| {
+            !handle.is_finished()
+        });
+    }
+    
+    /// 检查是否可以启动新任务
+    fn can_start_new_task(&self) -> bool {
+        self.calculation_tasks.len() < self.max_concurrent_tasks
+    }
+    
+    /// 等待任务槽位可用
+    async fn wait_for_task_slot(&mut self) {
+        while !self.can_start_new_task() {
+            self.cleanup_finished_tasks();
+            if !self.can_start_new_task() {
+                tokio::task::yield_now().await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
+    
+    /// 启动项目计算任务（带并发控制）
+    async fn start_project_calculation_task(
+        &mut self, 
+        project_path: std::path::PathBuf,
+        project_name: String,
+        sender: mpsc::UnboundedSender<Event>
+    ) {
+        // 清理已完成的任务
+        self.cleanup_finished_tasks();
+        
+        // 等待任务槽位可用
+        self.wait_for_task_slot().await;
+        
+        // 保存项目名用于任务管理
+        let task_key = project_name.clone();
+        
+        // 启动新任务
+        let handle = tokio::spawn(async move {
+            // 先发送开始计算事件
+            let _ = sender.send(Event::ProjectCalculationStarted {
+                project_name: project_name.clone(),
+            });
+            
+            Self::calculate_project_details(project_path, project_name, sender).await;
+        });
+        
+        self.calculation_tasks.insert(task_key, handle);
+    }
+    
+    /// 清理所有运行中的任务
+    async fn cleanup_all_tasks(&mut self) {
+        let tasks: Vec<_> = self.calculation_tasks.drain().collect();
+        
+        // 等待所有任务完成或超时
+        let timeout = tokio::time::Duration::from_secs(2);
+        let mut handles = Vec::new();
+        
+        for (_project_name, handle) in tasks {
+            handles.push(handle);
+        }
+        
+        if !handles.is_empty() {
+            match tokio::time::timeout(timeout, futures::future::join_all(handles)).await {
+                Ok(_) => tracing::info!("所有计算任务已完成"),
+                Err(_) => {
+                    tracing::warn!("等待任务完成超时，强制退出");
+                    // 超时的任务会自动被丢弃
+                }
+            }
+        }
     }
 }
