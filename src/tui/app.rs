@@ -96,6 +96,7 @@ use crate::tui::events::{Event, EventHandler, keys};
 use crate::tui::screens::MainScreen;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use std::collections::HashMap;
 
 /// 应用程序状态
@@ -176,6 +177,9 @@ pub struct App {
     /// 最大并发任务数限制
     #[allow(dead_code)]
     max_concurrent_tasks: usize,
+    
+    /// 取消令牌，用于优雅退出任务
+    cancellation_token: CancellationToken,
 }
 
 /// 视图标签
@@ -209,6 +213,7 @@ impl App {
             main_screen: MainScreen::new(),
             calculation_tasks: HashMap::new(),
             max_concurrent_tasks: 10, // 限制最多10个并发计算任务
+            cancellation_token: CancellationToken::new(),
         }
     }
     
@@ -965,13 +970,14 @@ impl App {
                 let project_name = project.name.clone();
                 let sender = self.event_handler.sender.clone();
                 
+                let cancel_token = self.cancellation_token.clone();
                 tokio::spawn(async move {
                     // 先发送开始计算事件
                     let _ = sender.send(Event::ProjectCalculationStarted {
                         project_name: project_name.clone(),
                     });
                     
-                    Self::calculate_project_details(project_path, project_name, sender).await;
+                    Self::calculate_project_details(project_path, project_name, sender, cancel_token).await;
                 });
                 
                 // 发现项目后不再扫描其子目录
@@ -1155,7 +1161,7 @@ impl App {
                                 project_name: project_name_for_status,
                             });
                             
-                            Self::calculate_project_details(project_path, project_name, sender).await;
+                            Self::calculate_project_details(project_path, project_name, sender, CancellationToken::new()).await;
                         });
                     }
                 }
@@ -1174,23 +1180,31 @@ impl App {
     async fn calculate_project_details(
         project_path: std::path::PathBuf,
         project_name: String,
-        progress_sender: mpsc::UnboundedSender<Event>
+        progress_sender: mpsc::UnboundedSender<Event>,
+        cancellation_token: CancellationToken,
     ) {
-        // 设置超时时间，防止计算任务无限运行
-        let timeout_duration = std::time::Duration::from_secs(300); // 5分钟超时
-        
-        let calculation = async move {
-            Self::calculate_project_details_impl(project_path, project_name, progress_sender).await
-        };
-        
-        match tokio::time::timeout(timeout_duration, calculation).await {
-            Ok(_) => {
-                // 计算正常完成
-                tracing::debug!("项目详细信息计算完成");
+        // 使用select来同时监听取消信号和计算任务
+        tokio::select! {
+            // 监听取消信号
+            _ = cancellation_token.cancelled() => {
+                // 任务被取消，这是正常情况
+                tracing::debug!("计算 {} 的项目详细信息被取消", project_name);
             }
-            Err(_) => {
-                // 计算超时
-                tracing::warn!("项目详细信息计算超时");
+            // 执行计算任务（带超时）
+            result = tokio::time::timeout(
+                std::time::Duration::from_secs(300), // 5分钟超时
+                Self::calculate_project_details_impl(project_path.clone(), project_name.clone(), progress_sender.clone(), cancellation_token.clone())
+            ) => {
+                match result {
+                    Ok(_) => {
+                        // 计算正常完成
+                        tracing::debug!("项目 {} 详细信息计算完成", project_name);
+                    }
+                    Err(_) => {
+                        // 计算超时
+                        tracing::warn!("计算 {} 的项目详细信息超时", project_name);
+                    }
+                }
             }
         }
     }
@@ -1199,7 +1213,8 @@ impl App {
     async fn calculate_project_details_impl(
         project_path: std::path::PathBuf,
         project_name: String,
-        progress_sender: mpsc::UnboundedSender<Event>
+        progress_sender: mpsc::UnboundedSender<Event>,
+        cancellation_token: CancellationToken,
     ) {
         use crate::scanner::{GitAnalyzer, SizeCalculator};
         use crate::config::Config;
@@ -1254,12 +1269,22 @@ impl App {
             })
         };
         
-        // 使用并发方式计算项目大小
-        match size_calculator.calculate_project_size_parallel(
-            &project_path, 
-            Some(progress_callback), 
-            project_name.clone()
-        ).await {
+        // 使用select来同时监听取消信号和大小计算任务
+        let calculation_result = tokio::select! {
+            // 监听取消信号
+            _ = cancellation_token.cancelled() => {
+                tracing::debug!("计算 {} 的项目大小被取消", project_name);
+                return;
+            }
+            // 执行大小计算任务
+            result = size_calculator.calculate_project_size_parallel(
+                &project_path, 
+                Some(progress_callback), 
+                project_name.clone()
+            ) => result
+        };
+        
+        match calculation_result {
             Ok(size_info) => {
                 // 发送详细信息更新事件
                 let _ = progress_sender.send(Event::ProjectDetailsUpdated {
@@ -1281,11 +1306,17 @@ impl App {
                 ));
             }
             Err(e) => {
-                // 计算失败的情况，记录错误日志并发送失败状态
-                tracing::error!("计算 {} 的项目大小失败: {}", project_name, e);
-                let _ = progress_sender.send(Event::ScanProgress(
-                    format!("计算 {} 的详细信息失败: {}，将使用默认值", project_name, e)
-                ));
+                // 检查是否是取消导致的错误
+                if cancellation_token.is_cancelled() {
+                    tracing::debug!("计算 {} 的项目大小被取消: {}", project_name, e);
+                    return;
+                } else {
+                    // 真正的计算失败，记录为警告而不是错误
+                    tracing::warn!("计算 {} 的项目大小失败: {}", project_name, e);
+                    let _ = progress_sender.send(Event::ScanProgress(
+                        format!("计算 {} 的详细信息失败: {}，将使用默认值", project_name, e)
+                    ));
+                }
                 
                 // 发送带有默认值的更新事件，确保项目状态更新
                 let _ = progress_sender.send(Event::ProjectDetailsUpdated {
@@ -1584,7 +1615,7 @@ impl App {
                 project_name: project_name.clone(),
             });
             
-            Self::calculate_project_details(project_path, project_name, sender).await;
+            Self::calculate_project_details(project_path, project_name, sender, CancellationToken::new()).await;
         });
         
         self.calculation_tasks.insert(task_key, handle);
@@ -1592,10 +1623,16 @@ impl App {
     
     /// 清理所有运行中的任务
     async fn cleanup_all_tasks(&mut self) {
-        let tasks: Vec<_> = self.calculation_tasks.drain().collect();
+        if self.calculation_tasks.is_empty() {
+            return;
+        }
         
-        // 等待所有任务完成或超时
-        let timeout = tokio::time::Duration::from_secs(2);
+        tracing::debug!("开始清理 {} 个计算任务", self.calculation_tasks.len());
+        
+        // 首先发送取消信号给所有任务
+        self.cancellation_token.cancel();
+        
+        let tasks: Vec<_> = self.calculation_tasks.drain().collect();
         let mut handles = Vec::new();
         
         for (_project_name, handle) in tasks {
@@ -1603,10 +1640,12 @@ impl App {
         }
         
         if !handles.is_empty() {
+            // 给任务一些时间优雅退出
+            let timeout = tokio::time::Duration::from_secs(3);
             match tokio::time::timeout(timeout, futures::future::join_all(handles)).await {
-                Ok(_) => tracing::info!("所有计算任务已完成"),
+                Ok(_) => tracing::debug!("所有计算任务已优雅完成"),
                 Err(_) => {
-                    tracing::warn!("等待任务完成超时，强制退出");
+                    tracing::debug!("等待任务完成超时，任务将被丢弃");
                     // 超时的任务会自动被丢弃
                 }
             }
