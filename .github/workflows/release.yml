@@ -1,0 +1,210 @@
+name: 构建和发布 Release
+
+on:
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号 (如: v1.0.0)'
+        required: false
+        default: ''
+  
+  # 推送 tag 时自动触发
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: 构建 ${{ matrix.platform.target }}
+    runs-on: ${{ matrix.platform.os }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          # macOS Intel
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: project-manager-cli-macos-intel
+          
+          # macOS Apple Silicon
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: project-manager-cli-macos-arm64
+          
+          # Linux x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: project-manager-cli-linux-x86_64
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+      
+      - name: 配置 Rust 缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform.target }}
+      
+      - name: 安装交叉编译工具 (macOS)
+        if: matrix.platform.os == 'macos-latest'
+        run: |
+          # macOS 上安装交叉编译目标
+          rustup target add ${{ matrix.platform.target }}
+      
+      - name: 安装交叉编译工具 (Linux)
+        if: matrix.platform.os == 'ubuntu-latest'
+        run: |
+          # Linux 上安装必要的依赖
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+          rustup target add ${{ matrix.platform.target }}
+      
+      - name: 构建项目
+        run: |
+          cargo build --release --target ${{ matrix.platform.target }}
+      
+      - name: 准备发布文件
+        shell: bash
+        run: |
+          # 创建发布目录
+          mkdir -p release
+          
+          # 设置可执行文件名
+          if [[ "${{ matrix.platform.os }}" == "windows-latest" ]]; then
+            EXECUTABLE="target/${{ matrix.platform.target }}/release/project-manager-cli.exe"
+            RELEASE_NAME="${{ matrix.platform.name }}.exe"
+          else
+            EXECUTABLE="target/${{ matrix.platform.target }}/release/project-manager-cli"
+            RELEASE_NAME="${{ matrix.platform.name }}"
+          fi
+          
+          # 复制可执行文件
+          cp "$EXECUTABLE" "release/$RELEASE_NAME"
+          
+          # 创建压缩包
+          cd release
+          if [[ "${{ matrix.platform.os }}" == "macos-latest" ]]; then
+            # macOS 使用 tar.gz
+            tar -czf "${{ matrix.platform.name }}.tar.gz" "$RELEASE_NAME"
+          else
+            # Linux 使用 tar.gz
+            tar -czf "${{ matrix.platform.name }}.tar.gz" "$RELEASE_NAME"
+          fi
+          
+          # 显示文件信息
+          ls -la
+          file "$RELEASE_NAME" || true
+      
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform.name }}
+          path: release/${{ matrix.platform.name }}.tar.gz
+          retention-days: 7
+
+  release:
+    name: 创建 GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      
+      - name: 下载所有构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: 准备发布文件
+        run: |
+          # 创建发布目录并整理文件
+          mkdir -p release-files
+          find artifacts -name "*.tar.gz" -exec cp {} release-files/ \;
+          
+          # 显示所有文件
+          echo "=== 发布文件列表 ==="
+          ls -la release-files/
+      
+      - name: 确定版本号
+        id: get_version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.version }}" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" =~ refs/tags/(.*) ]]; then
+            echo "version=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+          else
+            echo "version=manual-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: 生成发布说明
+        id: release_notes
+        run: |
+          cat > release_notes.md << 'EOF'
+          ## 📦 Project Manager CLI ${{ steps.get_version.outputs.version }}
+          
+          ### 🚀 使用方法
+          1. 下载适合你系统的版本
+          2. 解压缩文件
+          3. 直接运行二进制文件即可启动 TUI 界面
+          
+          ### 📋 支持的平台
+          - **macOS Intel (x86_64)**: `project-manager-cli-macos-intel.tar.gz`
+          - **macOS Apple Silicon (ARM64)**: `project-manager-cli-macos-arm64.tar.gz`
+          - **Linux x86_64**: `project-manager-cli-linux-x86_64.tar.gz`
+          
+          ### 💡 功能特性
+          - 默认启动 TUI 交互界面
+          - 项目扫描和管理功能
+          - 支持多种项目类型检测
+          - 可配置的扫描参数
+          
+          ### 🔧 命令行选项
+          ```bash
+          # 直接运行 - 启动 TUI 界面
+          ./project-manager-cli
+          
+          # 指定扫描路径
+          ./project-manager-cli /path/to/projects
+          
+          # 其他命令
+          ./project-manager-cli scan        # 扫描项目
+          ./project-manager-cli config      # 管理配置
+          ./project-manager-cli clean       # 清理项目
+          ```
+          
+          ---
+          🤖 自动构建于: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          EOF
+          
+          echo "Release notes generated"
+      
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}
+          name: "Project Manager CLI ${{ steps.get_version.outputs.version }}"
+          body_path: release_notes.md
+          files: release-files/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 发布完成提示
+        run: |
+          echo "🎉 Release ${{ steps.get_version.outputs.version }} 创建成功!"
+          echo "📥 用户可以从 GitHub Releases 页面下载对应平台的二进制文件"
+          echo "🖥️  下载后直接运行即可启动 TUI 界面"

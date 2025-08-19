@@ -7,7 +7,11 @@ use std::path::PathBuf;
 #[command(version = "0.1.0")]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
+    
+    /// 初始扫描路径 (默认启动 TUI 模式时使用)
+    #[arg(default_value = ".")]
+    pub paths: Vec<String>,
     
     /// 配置文件路径
     #[arg(short, long)]

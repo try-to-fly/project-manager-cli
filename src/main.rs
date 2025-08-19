@@ -32,14 +32,14 @@ async fn main() -> Result<()> {
     
     // 根据命令执行相应操作
     match cli.command {
-        Commands::Scan { paths, depth, format: _, output: _ } => {
+        Some(Commands::Scan { paths, depth, format: _, output: _ }) => {
             println!("扫描功能待实现");
             println!("扫描路径: {:?}", paths);
             if let Some(d) = depth {
                 println!("最大深度: {}", d);
             }
         }
-        Commands::Tui { paths } => {
+        Some(Commands::Tui { paths }) => {
             let scan_paths = if paths.is_empty() {
                 vec![std::env::current_dir()?.display().to_string()]
             } else {
@@ -49,23 +49,34 @@ async fn main() -> Result<()> {
             let mut app = App::new(config, scan_paths);
             app.run().await?;
         }
-        Commands::Clean { project_path, clean_type: _, force } => {
+        Some(Commands::Clean { project_path, clean_type: _, force }) => {
             println!("清理功能待实现");
             println!("项目路径: {}", project_path);
             println!("强制执行: {}", force);
         }
-        Commands::Delete { project_path, force } => {
+        Some(Commands::Delete { project_path, force }) => {
             println!("删除功能待实现");
             println!("项目路径: {}", project_path);
             println!("强制执行: {}", force);
         }
-        Commands::Config { action } => {
+        Some(Commands::Config { action }) => {
             handle_config_command(action, &config).await?;
         }
-        Commands::Stats { paths, detailed } => {
+        Some(Commands::Stats { paths, detailed }) => {
             println!("统计功能待实现");
             println!("分析路径: {:?}", paths);
             println!("详细统计: {}", detailed);
+        }
+        None => {
+            // 默认启动 TUI 模式
+            let scan_paths = if cli.paths.is_empty() {
+                vec![std::env::current_dir()?.display().to_string()]
+            } else {
+                cli.paths
+            };
+            
+            let mut app = App::new(config, scan_paths);
+            app.run().await?;
         }
     }
     
