@@ -29,7 +29,7 @@ walkdir = "2.5"
 indicatif = "0.17"
 
 # Git 仓库操作
-git2 = "0.19"
+git2 = { version = "0.19", default-features = false, features = ["vendored-openssl"] }
 
 # 文件删除到回收站
 trash = "5.1"
