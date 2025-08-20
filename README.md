@@ -15,14 +15,66 @@
 
 ## 🚀 快速开始
 
-### 系统要求
+### 安装方式
 
-- Rust 1.70 或更高版本
-- Git（用于 Git 仓库分析功能）
+#### 方式一：自动安装脚本（推荐）
 
-### 安装依赖
+使用我们提供的安装脚本，自动下载并安装适合您系统的预编译版本：
 
-确保你的系统已安装 Rust：
+```bash
+# 使用 curl（推荐）
+curl -fsSL https://raw.githubusercontent.com/try-to-fly/project-manager-cli/main/install.sh | bash
+
+# 或者使用 wget
+wget -qO- https://raw.githubusercontent.com/try-to-fly/project-manager-cli/main/install.sh | bash
+
+# 也可以先下载脚本查看内容
+curl -fsSL https://raw.githubusercontent.com/try-to-fly/project-manager-cli/main/install.sh -o install.sh
+chmod +x install.sh
+./install.sh
+```
+
+安装脚本会：
+- 自动检测您的操作系统和架构（支持 Linux、macOS、Windows）
+- 下载对应的预编译二进制文件
+- 安装到 `~/.local/bin` 或 `~/bin`（无需 sudo 权限）
+- 提示您配置 PATH 环境变量（如需要）
+
+#### 方式二：直接下载预编译版本
+
+从 [Releases](https://github.com/try-to-fly/project-manager-cli/releases) 页面下载适合您系统的版本：
+
+**macOS：**
+```bash
+# Intel Mac
+curl -L https://github.com/try-to-fly/project-manager-cli/releases/latest/download/project-manager-cli-macos-intel.tar.gz -o pm-cli.tar.gz
+
+# Apple Silicon (M1/M2/M3)
+curl -L https://github.com/try-to-fly/project-manager-cli/releases/latest/download/project-manager-cli-macos-arm64.tar.gz -o pm-cli.tar.gz
+
+# 解压并安装
+tar -xzf pm-cli.tar.gz
+chmod +x project-manager-cli-*
+mv project-manager-cli-* ~/.local/bin/project-manager-cli
+```
+
+**Linux：**
+```bash
+# x86_64
+curl -L https://github.com/try-to-fly/project-manager-cli/releases/latest/download/project-manager-cli-linux-x86_64.tar.gz -o pm-cli.tar.gz
+
+# 解压并安装
+tar -xzf pm-cli.tar.gz
+chmod +x project-manager-cli-*
+mv project-manager-cli-* ~/.local/bin/project-manager-cli
+```
+
+**Windows：**
+从 [Releases](https://github.com/try-to-fly/project-manager-cli/releases) 页面下载 Windows 版本并解压到合适的位置。
+
+#### 方式三：从源码构建
+
+如果您想从源码构建，需要先安装 Rust：
 
 ```bash
 # 安装 Rust（如果还没有安装）
@@ -34,139 +86,84 @@ rustc --version
 cargo --version
 ```
 
-### 构建项目
+然后构建项目：
 
 ```bash
-# 克隆项目（如果从远程仓库）
-git clone <repository-url>
+# 克隆项目
+git clone https://github.com/try-to-fly/project-manager-cli.git
 cd project-manager-cli
 
-# 或者直接在项目目录中构建
-cd /Users/smile/Documents/try-to-fly/project-manager-cli
-
-# 安装依赖并构建
+# 构建 release 版本
 cargo build --release
+
+# 安装到系统（可选）
+cargo install --path .
 ```
 
-### 运行项目
+### 验证安装
 
-#### 开发模式运行
+安装完成后，验证是否成功：
+
+```bash
+# 查看版本
+project-manager-cli --version
+
+# 查看帮助
+project-manager-cli --help
+```
+
+如果提示找不到命令，请确保安装目录在您的 PATH 中：
+
+```bash
+# 添加到 PATH（bash）
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+
+# 添加到 PATH（zsh）
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+## 📖 使用示例
+
+### 基本使用
 
 ```bash
 # 扫描当前目录
-cargo run -- scan
+project-manager-cli scan
 
 # 扫描指定目录
-cargo run -- scan ~/Documents ~/Projects
+project-manager-cli scan ~/Documents ~/Projects
 
 # 启动交互式 TUI 界面
-cargo run -- tui
+project-manager-cli tui
 
 # 显示项目统计信息
-cargo run -- stats ~/Documents
+project-manager-cli stats ~/Documents
 
 # 清理项目依赖
-cargo run -- clean /path/to/project
+project-manager-cli clean /path/to/project
 
 # 查看帮助信息
-cargo run -- --help
+project-manager-cli --help
 ```
 
-#### 生产模式运行
+### 高级用法
 
 ```bash
-# 构建 release 版本
-cargo build --release
+# 指定最大扫描深度
+project-manager-cli scan ~/Documents --depth 5
 
-# 运行构建好的二进制文件
-./target/release/project-manager-cli scan ~/Documents
+# 输出为 JSON 格式
+project-manager-cli scan ~/Documents --format json
+
+# 保存结果到文件
+project-manager-cli scan ~/Documents --output results.json
+
+# 使用自定义配置文件
+project-manager-cli --config custom-config.toml scan ~/Documents
 ```
 
-## 📦 打包和分发
-
-### 方式一：本地构建
-
-```bash
-# 构建 release 版本
-cargo build --release
-
-# 二进制文件位置
-ls -la target/release/project-manager-cli
-
-# 复制到系统路径（可选）
-sudo cp target/release/project-manager-cli /usr/local/bin/
-```
-
-### 方式二：使用 cargo install
-
-```bash
-# 从本地安装
-cargo install --path .
-
-# 安装后可在任何地方使用
-project-manager-cli scan ~/Documents
-```
-
-### 方式三：交叉编译
-
-```bash
-# 安装交叉编译工具链
-rustup target add x86_64-pc-windows-gnu
-rustup target add x86_64-apple-darwin
-rustup target add x86_64-unknown-linux-gnu
-
-# 为 Windows 编译
-cargo build --release --target x86_64-pc-windows-gnu
-
-# 为 macOS 编译
-cargo build --release --target x86_64-apple-darwin
-
-# 为 Linux 编译
-cargo build --release --target x86_64-unknown-linux-gnu
-```
-
-### 方式四：创建安装包
-
-#### macOS (使用 cargo-bundle)
-
-```bash
-# 安装 cargo-bundle
-cargo install cargo-bundle
-
-# 在 Cargo.toml 中添加 bundle 配置
-# [package.metadata.bundle]
-# name = "Project Manager CLI"
-# identifier = "com.example.project-manager-cli"
-
-# 创建 macOS 应用包
-cargo bundle --release
-```
-
-#### Linux (创建 DEB 包)
-
-```bash
-# 安装 cargo-deb
-cargo install cargo-deb
-
-# 创建 DEB 包
-cargo deb
-
-# 生成的包位置
-ls -la target/debian/
-```
-
-#### Windows (创建 MSI 安装包)
-
-```bash
-# 安装 cargo-wix
-cargo install cargo-wix
-
-# 创建 WiX 配置
-cargo wix init
-
-# 构建 MSI 包
-cargo wix --target x86_64-pc-windows-gnu
-```
 
 ## 🛠️ 使用指南
 
